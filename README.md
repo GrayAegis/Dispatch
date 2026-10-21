@@ -36,7 +36,9 @@ Extensions panel → Dispatch: enable; let the world move on its own; hours that
 
 - *The chat's connection, prompt sent straight* (default): the same endpoint and model your chat uses, but the request carries only the writer's messages, the model, and max tokens — none of your preset's prompts, samplers, or reasoning settings. A newspaper doesn't need a thinking budget.
 - *A connection profile*: any profile from Connection Manager, tried without its preset first, then with it.
-- *An OpenAI-compatible URL and model*: a base URL ending in `/v1`, a model name, and an optional key (sent as a bearer header; it is kept in your SillyTavern settings file, so don't use this on a shared install). Good for pointing the writer at a cheap or local model.
+- *An OpenAI-compatible URL and model*: a base URL ending in `/v1`, a model name, and an optional key (sent as a bearer header; it is kept in your SillyTavern settings file, so don't use this on a shared install). Good for pointing the writer at a cheap or local model. *Extra request body* (YAML) is merged into the request; for DeepSeek and most thinking models, `thinking: {type: disabled}` stops the model spending its budget on reasoning.
+
+*Test the writer* sends a one-word request to whatever is configured and shows what came back. Every toast Dispatch shows is also written to the browser console.
 
 Temperature is blank by default, leaving the endpoint's own default; set it if the writer is too flat or too wild.
 

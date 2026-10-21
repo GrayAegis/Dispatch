@@ -38,6 +38,8 @@ const defaultSettings = {
     customUrl: '',
     customModel: '',
     customKey: '',
+    /** Extra request body for the custom endpoint, YAML, merged into the request (e.g. thinking: {type: disabled}). */
+    customBody: '',
     /** Temperature for the writer; blank leaves it to the endpoint's default. */
     temperature: '',
     /** Max tokens for the writer's answer. Thinking models spend some of this on reasoning first. */
@@ -54,6 +56,14 @@ function settings() {
 function saveSettings() {
     getContext().saveSettingsDebounced();
 }
+
+/** Toasts, also written to the console so they can be read after they fade. */
+const notify = {
+    info: (text, options) => { console.info(LOG, text); return toastr.info(text, 'Dispatch', options); },
+    success: (text, options) => { console.info(LOG, text); return toastr.success(text, 'Dispatch', options); },
+    warning: (text, options) => { console.warn(LOG, text); return toastr.warning(text, 'Dispatch', options); },
+    error: (text, options) => { console.error(LOG, text); return toastr.error(text, 'Dispatch', options); },
+};
 
 /** Per-chat store, in chat metadata. */
 function store() {
@@ -91,18 +101,15 @@ export const writer = {
             const content = String(result?.content ?? '').trim();
             const reasoning = String(result?.reasoning ?? '').trim();
 
-            if (!content && reasoning) {
-                // A thinking model that ran out of tokens, or put the answer in its reasoning. Try the reasoning.
-                console.warn(LOG, 'the writer answered with reasoning but no content; trying the reasoning text', { reasoningChars: reasoning.length });
-                return reasoning;
-            }
+            writer.lastReasoning = reasoning;
 
             if (!content) {
-                console.warn(LOG, 'the writer answered with nothing', result);
+                console.warn(LOG, reasoning ? `the writer answered with ${reasoning.length} chars of reasoning but no content` : 'the writer answered with nothing', result);
             }
 
             return content;
         };
+        writer.lastReasoning = '';
 
         if (s.source === 'custom') {
             if (!s.customUrl || !s.customModel) {
@@ -115,6 +122,7 @@ export const writer = {
                 chat_completion_source: 'custom',
                 custom_url: s.customUrl.replace(/\/+$/, ''),
                 custom_include_headers: s.customKey ? `Authorization: Bearer ${s.customKey}` : undefined,
+                custom_include_body: s.customBody || undefined,
                 max_tokens: maxTokens,
                 temperature,
             }, {}, true);
@@ -263,9 +271,16 @@ async function produce({ mode, request, n }) {
     let docs = parseDocuments(answer);
 
     if (!docs.length && !String(answer ?? '').trim()) {
-        // Empty answer: most often a thinking model that spent the whole budget reasoning. Once more, with room.
-        console.warn(LOG, `empty answer at ${s.maxTokens} tokens; retrying with ${s.maxTokens * 2}`);
+        // No content: most often a thinking model that spent the whole budget reasoning. Once more, with room.
+        console.warn(LOG, `no content at ${s.maxTokens} tokens; retrying with ${s.maxTokens * 2}`);
         answer = await writer.call(messages, s.maxTokens * 2);
+        docs = parseDocuments(answer);
+    }
+
+    if (!docs.length && !String(answer ?? '').trim() && writer.lastReasoning) {
+        // Still nothing: some models put the answer inside their reasoning. Last try.
+        console.warn(LOG, 'still no content; looking for documents in the reasoning text');
+        answer = writer.lastReasoning;
         docs = parseDocuments(answer);
     }
 
@@ -274,7 +289,7 @@ async function produce({ mode, request, n }) {
         console.warn(LOG, `the writer returned nothing usable (${text.length} chars). Start:`, text.slice(0, 400) || '<empty string>', '… End:', text.slice(-300));
 
         if (text.trim()) {
-            toastr.warning(`The writer answered (${text.length} characters) but it couldn't be read as documents. If the answer looks cut off, raise Max tokens in Dispatch settings (now ${s.maxTokens}).`, 'Dispatch', { timeOut: 10000 });
+            notify.warning(`The writer answered (${text.length} characters) but it couldn't be read as documents. If the answer looks cut off, raise Max tokens in Dispatch settings (now ${s.maxTokens}).`, { timeOut: 10000 });
         }
     }
 
@@ -289,6 +304,7 @@ let workingToast = null;
 /** A toast that stays up while the writer works, so a failure is recognisably Dispatch's and not the chat's. */
 function working(text) {
     stopWorking();
+    console.info(LOG, text);
     workingToast = toastr.info(text, 'Dispatch is writing', { timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, progressBar: false });
 }
 
@@ -302,7 +318,7 @@ function stopWorking() {
 function failed(error) {
     const message = String(error?.message ?? error ?? 'unknown error');
     console.error(LOG, 'writer failed:', error);
-    toastr.error(`The writer's request failed: ${message}. The chat itself is unaffected.`, 'Dispatch', { timeOut: 8000 });
+    notify.error(`The writer's request failed: ${message}. The chat itself is unaffected.`, { timeOut: 8000 });
 }
 
 async function dispatch(hours, { manual = false } = {}) {
@@ -314,7 +330,7 @@ async function dispatch(hours, { manual = false } = {}) {
     }
 
     if (busy) {
-        toastr.info('Still writing the last one.', 'Dispatch');
+        notify.info('Still writing the last one.');
         return [];
     }
 
@@ -337,9 +353,9 @@ async function dispatch(hours, { manual = false } = {}) {
             data.noteFor = data.items.slice(0, docs.length).map(d => d.id);
             applyWorldNote();
             saveStore();
-            toastr.info(`${docs.length} new ${docs.length === 1 ? 'thing' : 'things'} in the world.`, 'Dispatch');
+            notify.info(`${docs.length} new ${docs.length === 1 ? 'thing' : 'things'} in the world.`);
         } else if (manual) {
-            toastr.warning('Nothing came back from the writer. See the console.', 'Dispatch');
+            notify.warning('Nothing came back from the writer. See the console.');
         }
 
         refreshBadge();
@@ -400,7 +416,7 @@ function bringIn(item) {
     applyReadNote();
     saveStore();
     refreshBadge();
-    toastr.success('The narrator will know it was read on your next turn.', 'Dispatch');
+    notify.success('The narrator will know it was read on your next turn.');
 }
 
 /** After a reply arrives: settle the one-turn notes, then see whether time passed. */
@@ -473,7 +489,7 @@ async function artefact({ kind, author, subject, notes }) {
     }
 
     if (busy) {
-        toastr.info('Still writing the last one.', 'Dispatch');
+        notify.info('Still writing the last one.');
         return null;
     }
 
@@ -492,7 +508,7 @@ async function artefact({ kind, author, subject, notes }) {
         const doc = docs[0];
 
         if (!doc) {
-            toastr.warning('Nothing came back from the writer. See the console.', 'Dispatch');
+            notify.warning('Nothing came back from the writer. See the console.');
             return null;
         }
 
@@ -530,10 +546,10 @@ async function fileToLorebook(item) {
         const result = await context.executeSlashCommandsWithOptions(`/createentry file=${quote(book)} key=${quote(keys.join(', '))} ${quote(content)}`);
         item.filed = { book, uid: result?.pipe ?? null };
         saveStore();
-        toastr.success(`Filed in "${book}".`, 'Dispatch');
+        notify.success(`Filed in "${book}".`);
     } catch (error) {
         console.error(LOG, error);
-        toastr.error('Could not file it: ' + String(error?.message ?? error), 'Dispatch');
+        notify.error('Could not file it: ' + String(error?.message ?? error));
     }
 }
 
@@ -653,7 +669,7 @@ async function exportItem(item, format) {
         }
     } catch (error) {
         console.error(LOG, error);
-        toastr.error(String(error?.message ?? error), 'Dispatch');
+        notify.error(String(error?.message ?? error));
     }
 }
 
@@ -1038,6 +1054,8 @@ function addSettingsPanel() {
                     <label>Base URL <input type="text" id="dsp-custom-url" class="text_pole" placeholder="https://api.example.com/v1"></label>
                     <label>Model <input type="text" id="dsp-custom-model" class="text_pole" placeholder="glm-4.5-flash"></label>
                     <label>API key <input type="password" id="dsp-custom-key" class="text_pole" placeholder="optional; stored in your settings file"></label>
+                    <label>Extra request body (YAML) <textarea id="dsp-custom-body" class="text_pole" rows="2" placeholder="thinking:&#10;  type: disabled"></textarea></label>
+                    <small>Merged into the request. For DeepSeek and most thinking models, <code>thinking: {type: disabled}</code> turns thinking off so the budget goes on the document.</small>
                 </div>
                 <label>Temperature <input type="text" id="dsp-temperature" class="text_pole dsp-num" placeholder="default"> (blank leaves the endpoint's default)</label>
                 <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="16000" class="text_pole dsp-num"></label>
@@ -1079,6 +1097,7 @@ function addSettingsPanel() {
     q('#dsp-custom-url').value = s.customUrl;
     q('#dsp-custom-model').value = s.customModel;
     q('#dsp-custom-key').value = s.customKey;
+    q('#dsp-custom-body').value = s.customBody;
     q('#dsp-temperature').value = s.temperature;
 
     const showSub = () => {
@@ -1100,6 +1119,7 @@ function addSettingsPanel() {
         s.customUrl = q('#dsp-custom-url').value.trim();
         s.customModel = q('#dsp-custom-model').value.trim();
         s.customKey = q('#dsp-custom-key').value.trim();
+        s.customBody = q('#dsp-custom-body').value.trim();
         const t = q('#dsp-temperature').value.trim();
         s.temperature = t === '' || Number.isNaN(Number(t)) ? '' : Number(t);
         saveSettings();
@@ -1107,7 +1127,7 @@ function addSettingsPanel() {
 
     q('#dsp-save').addEventListener('click', () => {
         readAll();
-        toastr.success('Saved.', 'Dispatch');
+        notify.success('Saved.');
     });
 
     q('#dsp-test').addEventListener('click', async () => {
@@ -1133,6 +1153,7 @@ function addSettingsPanel() {
     q('#dsp-custom-url').addEventListener('change', (e) => { s.customUrl = e.target.value.trim(); saveSettings(); });
     q('#dsp-custom-model').addEventListener('change', (e) => { s.customModel = e.target.value.trim(); saveSettings(); });
     q('#dsp-custom-key').addEventListener('change', (e) => { s.customKey = e.target.value.trim(); saveSettings(); });
+    q('#dsp-custom-body').addEventListener('change', (e) => { s.customBody = e.target.value.trim(); saveSettings(); });
     q('#dsp-temperature').addEventListener('change', (e) => { const v = e.target.value.trim(); s.temperature = v === '' || Number.isNaN(Number(v)) ? '' : Number(v); e.target.value = s.temperature; saveSettings(); });
 
     q('#dsp-enabled').addEventListener('change', (e) => { s.enabled = e.target.checked; saveSettings(); applyWorldNote(); applyReadNote(); });
