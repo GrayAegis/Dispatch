@@ -398,6 +398,126 @@ async function fileToLorebook(item) {
     }
 }
 
+/* ---------------------------------------------------------------- export */
+
+let cssText = null;
+
+/** The document styles, for standalone files. Only the page rules, not the tray. */
+async function documentCss() {
+    if (cssText !== null) {
+        return cssText;
+    }
+
+    try {
+        const url = new URL('./style.css', import.meta.url);
+        const text = await (await fetch(url)).text();
+        const start = text.indexOf('/* ---- documents');
+        cssText = start >= 0 ? text.slice(start) : text;
+    } catch (error) {
+        console.warn(LOG, 'could not load style.css for export', error);
+        cssText = '';
+    }
+
+    return cssText;
+}
+
+function safeName(item) {
+    const base = `${KINDS[item.kind]?.label ?? item.kind} - ${item.title || item.source}`;
+    return base.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'document';
+}
+
+async function standaloneHtml(item) {
+    const css = await documentCss();
+    const page = render(item, getContext().name1);
+    const title = (item.title || item.source || 'Document').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+    return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>
+html, body { margin: 0; padding: 0; background: #2b2b2b; }
+body { display: flex; justify-content: center; padding: 40px 16px; box-sizing: border-box; min-height: 100vh; }
+${css}
+</style>
+</head>
+<body>
+${page.outerHTML}
+</body>
+</html>`;
+}
+
+/** Draw a rendered page to a PNG via an SVG foreignObject; works because the page uses no external resources. */
+async function pageToPng(item) {
+    const css = await documentCss();
+    const page = render(item, getContext().name1);
+    page.style.boxShadow = 'none';
+
+    // Measure it in the live document at the width it would be shown at.
+    const probe = document.createElement('div');
+    probe.style.cssText = 'position:fixed;left:-10000px;top:0;width:720px;';
+    probe.appendChild(page);
+    document.body.appendChild(probe);
+    const width = Math.ceil(page.getBoundingClientRect().width);
+    const height = Math.ceil(page.getBoundingClientRect().height);
+    probe.remove();
+
+    const scale = 2;
+    const xhtml = `<div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px"><style>${css}</style>${page.outerHTML}</div>`;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`;
+    // A data URI, not a blob URL: Chromium treats a blob-loaded SVG with foreignObject as tainting the canvas.
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+
+    try {
+        const image = await new Promise((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error('could not rasterise the page'));
+            img.src = url;
+        });
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext('2d');
+        ctx.scale(scale, scale);
+        ctx.drawImage(image, 0, 0);
+        return await new Promise((resolve, reject) => canvas.toBlob(b => (b ? resolve(b) : reject(new Error('empty image'))), 'image/png'));
+    } finally {
+        // nothing to release for a data URI
+    }
+}
+
+function saveBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    // Inside the open dialog: everything outside a modal dialog is inert, and an inert link won't download.
+    (popup?.content ?? document.body).appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+async function exportItem(item, format) {
+    const name = safeName(item);
+
+    try {
+        if (format === 'json') {
+            const data = { kind: item.kind, source: item.source, title: item.title, date: item.date, from: item.from, to: item.to, found: item.found, body: item.body };
+            saveBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${name}.json`);
+        } else if (format === 'html') {
+            saveBlob(new Blob([await standaloneHtml(item)], { type: 'text/html' }), `${name}.html`);
+        } else if (format === 'png') {
+            saveBlob(await pageToPng(item), `${name}.png`);
+        }
+    } catch (error) {
+        console.error(LOG, error);
+        toastr.error(String(error?.message ?? error), 'Dispatch');
+    }
+}
+
 /* ---------------------------------------------------------------- UI */
 
 function element(tag, className, text) {
@@ -629,6 +749,18 @@ function drawDocument(body, item) {
     const copy = element('button', 'menu_button', 'Copy text');
     copy.addEventListener('click', () => navigator.clipboard?.writeText(plainText(item)).then(() => toastr.info('Copied.', 'Dispatch')));
     actions.appendChild(copy);
+
+    const save = element('span', 'dsp-save');
+    save.appendChild(element('span', 'dsp-save-label', 'Save as'));
+
+    for (const [format, label, title] of [['html', 'HTML', 'A standalone page, styled, opens anywhere'], ['png', 'PNG', 'The rendered page as an image'], ['json', 'JSON', 'The document as the writer produced it']]) {
+        const b = element('button', 'menu_button dsp-save-btn', label);
+        b.title = title;
+        b.addEventListener('click', () => exportItem(item, format));
+        save.appendChild(b);
+    }
+
+    actions.appendChild(save);
 
     const remove = element('button', 'menu_button dsp-danger', 'Discard');
     remove.addEventListener('click', () => {

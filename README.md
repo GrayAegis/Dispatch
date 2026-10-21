@@ -18,6 +18,8 @@ No extra calls during normal play. One call when time passes (if enabled), one p
 
 **Bringing one in.** On a document, *Bring into the scene* tells the narrator, for one turn, that your character has just read it, verbatim, and that the people around react only to what they can see — not to the contents unless they already know them. Your next message is still yours; nothing decides what your character makes of it.
 
+**Saving.** *Save as* HTML (a standalone styled page), PNG (the rendered page at 2×), or JSON (the document as the writer produced it). The file is named after the kind and title.
+
 **Filing.** *File to lorebook* writes the document into the chat-bound lorebook as a keyed entry (title, source, author as keys), so it enters the prompt only when it's relevant later.
 
 **Artefacts.** *New document* in the tray, or `/artefact kind=file author="GCPD" subject="the girl on the roof"`. Same writer, same rendering, goes to the Library; nothing enters the story unless you bring it in or file it.
