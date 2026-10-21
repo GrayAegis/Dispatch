@@ -128,20 +128,108 @@ export function parseDocuments(text) {
     }
 
     for (const candidate of candidates) {
-        try {
-            const value = JSON.parse(candidate);
-            const list = Array.isArray(value) ? value : [value];
-            const docs = list.map(normalise).filter(Boolean);
+        const docs = tryParse(candidate) ?? tryParse(escapeControlChars(candidate));
 
-            if (docs.length) {
-                return docs;
-            }
-        } catch {
-            // try the next shape
+        if (docs?.length) {
+            return docs;
         }
     }
 
-    return [];
+    // Still nothing: the answer was probably cut off. Take every complete object we can find.
+    const salvaged = balancedObjects(escapeControlChars(raw)).map(tryParse).flat().filter(Boolean);
+    return salvaged.length ? salvaged : [];
+}
+
+function tryParse(text) {
+    try {
+        const value = JSON.parse(text);
+        const list = Array.isArray(value) ? value : [value];
+        return list.map(normalise).filter(Boolean);
+    } catch {
+        return null;
+    }
+}
+
+/** Raw newlines and tabs inside JSON strings, which models write and JSON.parse refuses. */
+function escapeControlChars(text) {
+    let out = '';
+    let inString = false;
+    let escaped = false;
+
+    for (const ch of String(text)) {
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+                out += ch;
+            } else if (ch === '\\') {
+                escaped = true;
+                out += ch;
+            } else if (ch === '"') {
+                inString = false;
+                out += ch;
+            } else if (ch === '\n') {
+                out += '\\n';
+            } else if (ch === '\r') {
+                out += '\\r';
+            } else if (ch === '\t') {
+                out += '\\t';
+            } else {
+                out += ch;
+            }
+        } else {
+            if (ch === '"') {
+                inString = true;
+            }
+
+            out += ch;
+        }
+    }
+
+    return out;
+}
+
+/** Every top-level {...} with balanced braces, ignoring braces inside strings. Incomplete trailing objects are dropped. */
+function balancedObjects(text) {
+    const found = [];
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (ch === '\\') {
+                escaped = true;
+            } else if (ch === '"') {
+                inString = false;
+            }
+
+            continue;
+        }
+
+        if (ch === '"') {
+            inString = true;
+        } else if (ch === '{') {
+            if (depth === 0) {
+                start = i;
+            }
+
+            depth++;
+        } else if (ch === '}') {
+            depth--;
+
+            if (depth === 0 && start >= 0) {
+                found.push(text.slice(start, i + 1));
+                start = -1;
+            }
+        }
+    }
+
+    return found;
 }
 
 function normalise(raw) {

@@ -270,7 +270,12 @@ async function produce({ mode, request, n }) {
     }
 
     if (!docs.length) {
-        console.warn(LOG, 'the writer returned nothing usable:', String(answer).slice(0, 600) || '<empty string>');
+        const text = String(answer ?? '');
+        console.warn(LOG, `the writer returned nothing usable (${text.length} chars). Start:`, text.slice(0, 400) || '<empty string>', '… End:', text.slice(-300));
+
+        if (text.trim()) {
+            toastr.warning(`The writer answered (${text.length} characters) but it couldn't be read as documents. If the answer looks cut off, raise Max tokens in Dispatch settings (now ${s.maxTokens}).`, 'Dispatch', { timeOut: 10000 });
+        }
     }
 
     return docs;
