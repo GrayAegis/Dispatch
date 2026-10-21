@@ -1148,14 +1148,22 @@ function addSettingsPanel() {
         const button = q('#dsp-test');
         button.disabled = true;
         out.textContent = 'asking…';
+        const where = s.source === 'custom' ? `${s.customUrl} / ${s.customModel}` : s.source === 'profile' ? `profile ${profileName(s.profile)}` : 'the chat connection';
+        console.info(LOG, `test: asking ${where} for a one-word answer (50 tokens)`);
 
         try {
             const started = Date.now();
             const answer = await writer.call([{ role: 'user', content: 'Reply with the single word OK and nothing else.' }], 50);
             const text = String(answer ?? '').trim();
-            out.textContent = text ? `answered in ${((Date.now() - started) / 1000).toFixed(1)}s: "${text.slice(0, 60)}"` : 'connected, but the answer was empty (a thinking model with no room? raise max tokens)';
+            const seconds = ((Date.now() - started) / 1000).toFixed(1);
+            const verdict = text
+                ? `answered in ${seconds}s: "${text.slice(0, 60)}"`
+                : `connected, but the answer was empty after ${seconds}s${writer.lastReasoning ? ` (it reasoned for ${writer.lastReasoning.length} chars instead: thinking is on)` : ''}`;
+            out.textContent = verdict;
+            (text ? notify.success : notify.warning)(`Test: ${verdict}`);
         } catch (error) {
             out.textContent = `failed: ${error?.message ?? error}`;
+            notify.error(`Test failed: ${error?.message ?? error}`);
         } finally {
             button.disabled = false;
         }
