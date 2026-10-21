@@ -12,7 +12,7 @@ import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.j
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { elapsed, timeLine } from './time.js';
-import { KINDS, KIND_KEYS, parseDocuments, plainText, render, summary, systemPrompt, userPrompt } from './documents.js';
+import { KINDS, KIND_KEYS, lorebookKeys, parseDocuments, plainText, render, summary, systemPrompt, userPrompt } from './documents.js';
 
 const MODULE_NAME = 'dispatch';
 const LOG = '[Dispatch]';
@@ -576,7 +576,12 @@ async function fileToLorebook(item) {
             throw new Error('this chat has no chat-bound lorebook (group chats and the no-character chat have none)');
         }
 
-        const keys = [item.title, item.source, item.from].filter(Boolean).map(k => String(k).replace(/[,"]/g, ' ').trim()).filter(Boolean).slice(0, 4);
+        const keys = lorebookKeys(item, [context.name1]);
+
+        if (!keys.length) {
+            keys.push(String(item.source || item.kind).replace(/[,"]/g, ' ').trim());
+        }
+
         const uid = (await context.executeSlashCommandsWithOptions(`/createentry file=${quote(book)} key=${quote(keys[0] ?? item.kind)} ${quote(plainText(item))}`))?.pipe?.trim();
 
         if (!uid) {

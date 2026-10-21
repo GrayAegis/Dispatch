@@ -80,7 +80,7 @@ Kinds:
 ${kinds}
 
 Answer with a JSON array and nothing else. Each item:
-{"kind": one of the kind keys, "source": who or what produced it (outlet, agency, sender), "title": a short title or headline or subject, "date": in-world date or time as the document itself would show it, "from": author or sender or null, "to": recipient or null, "found": one sentence on how ${userName} could come across it in the scene, in the world's own terms, "body": the document's full text, with newlines as \\n}
+{"kind": one of the kind keys, "source": who or what produced it, short (the outlet, agency, or sender's name; not a description), "title": a short title or headline or subject, "date": in-world date or time as the document itself would show it, "from": author or sender or null, "to": recipient or null, "found": one sentence on how ${userName} could come across it in the scene, in the world's own terms, "keys": 3 to 6 short terms that would plausibly come up in later conversation about this document — people, places, organisations, objects, events — each one to three words, never the title, never ${userName}, "body": the document's full text, with newlines as \\n}
 `;
 
     if (mode === 'dispatch') {
@@ -252,8 +252,64 @@ function normalise(raw) {
         from: raw.from ? String(raw.from).trim() : null,
         to: raw.to ? String(raw.to).trim() : null,
         found: String(raw.found ?? raw.where ?? '').trim(),
+        keys: cleanKeys(Array.isArray(raw.keys) ? raw.keys : typeof raw.keys === 'string' ? raw.keys.split(/[,;]/) : []),
         body,
     };
+}
+
+function cleanKeys(list) {
+    const out = [];
+
+    for (const raw of list) {
+        const key = String(raw ?? '').replace(/[,"]/g, ' ').replace(/\s+/g, ' ').trim();
+
+        if (key && key.length <= 40 && !out.some(k => k.toLowerCase() === key.toLowerCase())) {
+            out.push(key);
+        }
+    }
+
+    return out.slice(0, 8);
+}
+
+const STOP = new Set(['The', 'A', 'An', 'And', 'But', 'Or', 'For', 'Nor', 'So', 'Yet', 'In', 'On', 'At', 'To', 'By', 'Of', 'From', 'With', 'As', 'If', 'When', 'While', 'After', 'Before', 'Then', 'There', 'This', 'That', 'These', 'Those', 'It', 'Its', 'He', 'She', 'They', 'We', 'You', 'I', 'His', 'Her', 'Their', 'Our', 'Your', 'My', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday', 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December', 'Yesterday', 'Today', 'Tomorrow', 'Morning', 'Evening', 'Night', 'Re', 'Ref', 'Status', 'Subject', 'Summary', 'Observations', 'Actions', 'Author', 'Location', 'Date', 'From', 'To']);
+
+/**
+ * Lorebook keys for a document: the writer's, or proper nouns from the text (runs of capitalised words),
+ * never the whole title. `exclude` holds names that should not be keys (the user's).
+ */
+export function lorebookKeys(doc, exclude = []) {
+    const banned = new Set(exclude.map(e => String(e).toLowerCase()).filter(Boolean));
+    const keys = cleanKeys(doc.keys ?? []).filter(k => !banned.has(k.toLowerCase()));
+
+    if (keys.length >= 2) {
+        return keys;
+    }
+
+    const segments = [doc.from, doc.to, doc.body].filter(Boolean).join('\n').split(/[\n\r]+|(?<=[.!?:;—–])\s+|\s[-–—]\s/);
+    const counts = new Map();
+    const runs = /\b([A-Z][\w'’.-]*(?:[ \t]+(?:of|the|de|van|von|al)[ \t]+)?(?:[ \t]+[A-Z][\w'’.-]*){0,3})\b/g;
+    let m;
+    const text = segments.join('\n');
+
+    while ((m = runs.exec(text)) !== null) {
+        const words = m[1].split(/\s+/).filter(w => !STOP.has(w.replace(/[.'’-]+$/, '')) && !(w.length > 3 && w === w.toUpperCase()));
+
+        if (!words.length) {
+            continue;
+        }
+
+        const key = words.join(' ').replace(/[.,;:]+$/, '');
+
+        if (key.length < 3 || key.length > 40 || banned.has(key.toLowerCase())) {
+            continue;
+        }
+
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+
+    const extracted = [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length).map(([k]) => k);
+    const merged = cleanKeys([...keys, doc.source, ...extracted]).filter(k => !banned.has(k.toLowerCase()));
+    return merged.slice(0, 6);
 }
 
 /** A one-line description for the in-tray and for telling the narrator what's around. */
