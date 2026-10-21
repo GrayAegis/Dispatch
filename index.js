@@ -6,6 +6,7 @@
  */
 import { eventSource, event_types, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
 import { extension_settings, getContext } from '../../../extensions.js';
+import { oai_settings, getChatCompletionModel } from '../../../openai.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.js';
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
@@ -29,8 +30,16 @@ const defaultSettings = {
     count: 1,
     /** Recent messages the writer sees. */
     recent: 12,
-    /** Connection profile id for the writer; empty uses the main API. */
+    /** Where the writer runs: 'main' (the chat's connection, prompt sent straight), 'profile', or 'custom'. */
+    source: 'main',
+    /** Connection profile id, for source 'profile'. */
     profile: '',
+    /** OpenAI-compatible endpoint, for source 'custom': base URL ending in /v1, model name, optional key. */
+    customUrl: '',
+    customModel: '',
+    customKey: '',
+    /** Temperature for the writer; blank leaves it to the endpoint's default. */
+    temperature: '',
     /** Max tokens for the writer's answer. */
     maxTokens: 1500,
     /** Depth of the one-turn world note. */
@@ -72,23 +81,70 @@ export const writer = {
     async call(messages, maxTokens) {
         const context = getContext();
         const s = settings();
-        const active = context.extensionSettings?.connectionManager?.selectedProfile ?? '';
-        const service = context.ConnectionManagerRequestService;
+        const service = context.ChatCompletionService;
+        const temperature = s.temperature === '' || s.temperature === null ? undefined : Number(s.temperature);
+        const unwrap = (result) => (typeof result === 'string' ? result : (result?.content ?? ''));
 
-        // The live connection is the one that just produced the reply; use it unless a different profile was chosen.
-        if (s.profile && s.profile !== active && service) {
+        if (s.source === 'custom') {
+            if (!s.customUrl || !s.customModel) {
+                throw new Error('custom endpoint needs a URL and a model name (Dispatch settings)');
+            }
+
+            const result = await service.processRequest({
+                messages,
+                model: s.customModel,
+                chat_completion_source: 'custom',
+                custom_url: s.customUrl.replace(/\/+$/, ''),
+                custom_include_headers: s.customKey ? `Authorization: Bearer ${s.customKey}` : undefined,
+                max_tokens: maxTokens,
+                temperature,
+            }, {}, true);
+            return unwrap(result);
+        }
+
+        if (s.source === 'profile' && s.profile && context.ConnectionManagerRequestService) {
+            const manager = context.ConnectionManagerRequestService;
+
             try {
-                const result = await service.sendRequest(s.profile, messages, maxTokens);
-                return typeof result === 'string' ? result : (result?.content ?? '');
-            } catch (withPreset) {
-                console.warn(LOG, 'profile request with its preset failed, retrying without the preset:', withPreset);
+                return unwrap(await manager.sendRequest(s.profile, messages, maxTokens, { includePreset: false, includeInstruct: false }));
+            } catch (plain) {
+                console.warn(LOG, 'profile request without its preset failed, retrying with it:', plain);
 
                 try {
-                    const result = await service.sendRequest(s.profile, messages, maxTokens, { includePreset: false, includeInstruct: false });
-                    return typeof result === 'string' ? result : (result?.content ?? '');
-                } catch (withoutPreset) {
-                    throw new Error(`profile "${profileName(s.profile)}": ${withPreset?.message ?? withPreset}; without its preset: ${withoutPreset?.message ?? withoutPreset}`);
+                    return unwrap(await manager.sendRequest(s.profile, messages, maxTokens));
+                } catch (withPreset) {
+                    throw new Error(`profile "${profileName(s.profile)}": ${plain?.message ?? plain}; with its preset: ${withPreset?.message ?? withPreset}`);
                 }
+            }
+        }
+
+        // Main: the chat's connection, the prompt sent straight. No preset prompts, no samplers, no
+        // reasoning settings: just messages, model, endpoint, max tokens.
+        if (context.mainApi === 'openai' && service) {
+            try {
+                const live = oai_settings;
+                const result = await service.processRequest({
+                    messages,
+                    model: getChatCompletionModel(),
+                    chat_completion_source: live.chat_completion_source,
+                    max_tokens: maxTokens,
+                    temperature,
+                    custom_url: live.custom_url,
+                    custom_include_headers: live.custom_include_headers,
+                    custom_include_body: live.custom_include_body,
+                    custom_exclude_body: live.custom_exclude_body,
+                    custom_prompt_post_processing: live.custom_prompt_post_processing,
+                    reverse_proxy: live.reverse_proxy,
+                    proxy_password: live.proxy_password,
+                    zai_endpoint: live.zai_endpoint,
+                    siliconflow_endpoint: live.siliconflow_endpoint,
+                    minimax_endpoint: live.minimax_endpoint,
+                    pollinations_endpoint: live.pollinations_endpoint,
+                    vertexai_region: live.vertexai_region,
+                }, {}, true);
+                return unwrap(result);
+            } catch (error) {
+                console.warn(LOG, 'straight request on the chat connection failed; using raw generation (preset parameters apply):', error);
             }
         }
 
@@ -938,7 +994,20 @@ function addSettingsPanel() {
                 <label>Time passed means at least <input type="number" id="dsp-threshold" min="1" max="720" class="text_pole dsp-num"> hours</label>
                 <label>Documents per dispatch <input type="number" id="dsp-count" min="1" max="4" class="text_pole dsp-num"></label>
                 <label>Recent messages the writer sees <input type="number" id="dsp-recent" min="2" max="60" class="text_pole dsp-num"></label>
-                <label>Writer's connection profile <select id="dsp-profile" class="text_pole"><option value="">main API (whatever the chat is using)</option></select></label>
+                <label>Writer runs on
+                    <select id="dsp-source" class="text_pole">
+                        <option value="main">the chat's connection, prompt sent straight (no preset)</option>
+                        <option value="profile">a connection profile</option>
+                        <option value="custom">an OpenAI-compatible URL and model</option>
+                    </select>
+                </label>
+                <div id="dsp-source-profile" class="dsp-sub"><label>Profile <select id="dsp-profile" class="text_pole"></select></label></div>
+                <div id="dsp-source-custom" class="dsp-sub">
+                    <label>Base URL <input type="text" id="dsp-custom-url" class="text_pole" placeholder="https://api.example.com/v1"></label>
+                    <label>Model <input type="text" id="dsp-custom-model" class="text_pole" placeholder="glm-4.5-flash"></label>
+                    <label>API key <input type="password" id="dsp-custom-key" class="text_pole" placeholder="optional; stored in your settings file"></label>
+                </div>
+                <label>Temperature <input type="text" id="dsp-temperature" class="text_pole dsp-num" placeholder="default"> (blank leaves the endpoint's default)</label>
                 <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="8000" class="text_pole dsp-num"></label>
                 <small>When in-fiction time passes (the reply's state comment moves its clock, or you write that time passed), the world writes what came into existence: a paper, a text, a note. The narrator is told only that it is within reach. Read it in the in-tray; bring it in if you want your character to have read it; file it to make it part of the chat's lorebook.</small>
             </div>
@@ -954,14 +1023,13 @@ function addSettingsPanel() {
     q('#dsp-tokens').value = s.maxTokens;
 
     const profile = q('#dsp-profile');
+    const source = q('#dsp-source');
 
     try {
         const profiles = getContext().extensionSettings?.connectionManager?.profiles ?? [];
 
-        const active = getContext().extensionSettings?.connectionManager?.selectedProfile ?? '';
-
         for (const p of profiles) {
-            const option = element('option', null, p.id === active ? `${p.name} (active — same as main API)` : p.name);
+            const option = element('option', null, p.name);
             option.value = p.id;
             profile.appendChild(option);
         }
@@ -970,6 +1038,23 @@ function addSettingsPanel() {
     }
 
     profile.value = s.profile;
+    source.value = s.source;
+    q('#dsp-custom-url').value = s.customUrl;
+    q('#dsp-custom-model').value = s.customModel;
+    q('#dsp-custom-key').value = s.customKey;
+    q('#dsp-temperature').value = s.temperature;
+
+    const showSub = () => {
+        q('#dsp-source-profile').style.display = source.value === 'profile' ? '' : 'none';
+        q('#dsp-source-custom').style.display = source.value === 'custom' ? '' : 'none';
+    };
+
+    showSub();
+    source.addEventListener('change', () => { s.source = source.value; saveSettings(); showSub(); });
+    q('#dsp-custom-url').addEventListener('change', (e) => { s.customUrl = e.target.value.trim(); saveSettings(); });
+    q('#dsp-custom-model').addEventListener('change', (e) => { s.customModel = e.target.value.trim(); saveSettings(); });
+    q('#dsp-custom-key').addEventListener('change', (e) => { s.customKey = e.target.value.trim(); saveSettings(); });
+    q('#dsp-temperature').addEventListener('change', (e) => { const v = e.target.value.trim(); s.temperature = v === '' || Number.isNaN(Number(v)) ? '' : Number(v); e.target.value = s.temperature; saveSettings(); });
 
     q('#dsp-enabled').addEventListener('change', (e) => { s.enabled = e.target.checked; saveSettings(); applyWorldNote(); applyReadNote(); });
     q('#dsp-auto').addEventListener('change', (e) => { s.auto = e.target.checked; saveSettings(); });
