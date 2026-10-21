@@ -528,7 +528,7 @@ async function artefact({ kind, author, subject, notes }) {
 
     busy = true;
     setStatus('writing…');
-    working(`Writing a ${KINDS[kind]?.label.toLowerCase() ?? kind}…`);
+    working(`Writing: ${KINDS[kind]?.label.toLowerCase() ?? kind}…`);
 
     try {
         const request = [
@@ -565,24 +565,54 @@ async function artefact({ kind, author, subject, notes }) {
 
 async function fileToLorebook(item) {
     const context = getContext();
+    const quote = (v) => `"${String(v).replace(/"/g, '\'')}"`;
 
     try {
+        // The chat-bound book: shared with MemoryBooks and anything else that writes there, which is fine;
+        // they manage only their own entries, and this one follows branches with the chat.
         const book = (await context.executeSlashCommandsWithOptions('/getchatbook'))?.pipe?.trim();
 
         if (!book) {
-            throw new Error('no chat lorebook');
+            throw new Error('this chat has no chat-bound lorebook (group chats and the no-character chat have none)');
         }
 
-        const keys = [item.title, item.source, item.from].filter(Boolean).map(k => k.replace(/[,"]/g, ' ').trim()).filter(Boolean).slice(0, 4);
-        const content = plainText(item).replace(/"/g, '\'');
-        const quote = (s) => `"${String(s).replace(/"/g, '\'')}"`;
-        const result = await context.executeSlashCommandsWithOptions(`/createentry file=${quote(book)} key=${quote(keys.join(', '))} ${quote(content)}`);
-        item.filed = { book, uid: result?.pipe ?? null };
+        const keys = [item.title, item.source, item.from].filter(Boolean).map(k => String(k).replace(/[,"]/g, ' ').trim()).filter(Boolean).slice(0, 4);
+        const uid = (await context.executeSlashCommandsWithOptions(`/createentry file=${quote(book)} key=${quote(keys[0] ?? item.kind)} ${quote(plainText(item))}`))?.pipe?.trim();
+
+        if (!uid) {
+            throw new Error('the entry could not be created');
+        }
+
+        await context.executeSlashCommandsWithOptions(`/setentryfield file=${quote(book)} uid=${uid} field=key ${quote(keys.join(', '))}`);
+        await context.executeSlashCommandsWithOptions(`/setentryfield file=${quote(book)} uid=${uid} field=comment ${quote('[Dispatch] ' + summary(item))}`);
+        item.filed = { book, uid };
         saveStore();
-        notify.success(`Filed in "${book}".`);
+        notify.success(`Filed in "${book}" (keys: ${keys.join(', ')}).`);
     } catch (error) {
         console.error(LOG, error);
         notify.error('Could not file it: ' + String(error?.message ?? error));
+    }
+}
+
+/** Put the document's text into the chat's Data Bank, for vector or RAG setups and for keeping. */
+async function toDataBank(item) {
+    const context = getContext();
+    const quote = (v) => `"${String(v).replace(/"/g, '\'')}"`;
+
+    try {
+        const name = `${safeName(item)}.txt`;
+        const url = (await context.executeSlashCommandsWithOptions(`/db-add source=chat name=${quote(name)} ${quote(plainText(item))}`))?.pipe?.trim();
+
+        if (!url) {
+            throw new Error('the Data Bank did not accept it (is the Attachments extension enabled?)');
+        }
+
+        item.banked = { name, url };
+        saveStore();
+        notify.success(`Added to the chat's Data Bank as "${name}".`);
+    } catch (error) {
+        console.error(LOG, error);
+        notify.error('Could not add it to the Data Bank: ' + String(error?.message ?? error));
     }
 }
 
@@ -848,7 +878,7 @@ function draw(root) {
             drawList(body, data.items.filter(i => i.origin !== 'artefact'), 'Nothing has arrived yet. Things appear here when in-fiction time passes.');
             break;
         case 'library':
-            drawList(body, data.items.filter(i => i.origin === 'artefact' || i.brought || i.filed), 'Nothing here yet. Documents you make, bring in, or file collect here.');
+            drawList(body, data.items.filter(i => i.origin === 'artefact' || i.brought || i.filed || i.banked), 'Nothing here yet. Documents you make, bring in, or file collect here.');
             break;
         case 'new':
             drawNewForm(body);
@@ -888,6 +918,10 @@ function drawList(body, items, emptyText) {
 
         if (item.filed) {
             flags.appendChild(element('span', 'dsp-flag', 'filed'));
+        }
+
+        if (item.banked) {
+            flags.appendChild(element('span', 'dsp-flag', 'data bank'));
         }
 
         row.appendChild(flags);
@@ -932,6 +966,15 @@ function drawDocument(body, item) {
         actions.appendChild(file);
     } else {
         actions.appendChild(element('span', 'dsp-flag', `filed in ${item.filed.book}`));
+    }
+
+    if (!item.banked) {
+        const bank = element('button', 'menu_button', 'To Data Bank');
+        bank.title = 'Add the text to this chat\'s Data Bank, for vector search and keeping.';
+        bank.addEventListener('click', async () => { await toDataBank(item); redraw(); });
+        actions.appendChild(bank);
+    } else {
+        actions.appendChild(element('span', 'dsp-flag', 'in Data Bank'));
     }
 
     const copy = element('button', 'menu_button', 'Copy text');

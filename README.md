@@ -20,7 +20,9 @@ No extra calls during normal play. One call when time passes (if enabled), one p
 
 **Saving.** *Save as* HTML (a standalone styled page), PNG (the rendered page at 2×), or JSON (the document as the writer produced it). The file is named after the kind and title.
 
-**Filing.** *File to lorebook* writes the document into the chat-bound lorebook as a keyed entry (title, source, author as keys), so it enters the prompt only when it's relevant later.
+**Filing.** *File to lorebook* writes the document into the chat-bound lorebook as a keyed entry (title, source, author as separate keys; comment prefixed `[Dispatch]`), so it enters the prompt only when it's relevant later. That book is shared with MemoryBooks if you use it; both leave each other's entries alone, and the book follows branches with the chat.
+
+**Data Bank.** *To Data Bank* adds the document's text to the chat's Data Bank as a `.txt`, for vector search setups and for keeping.
 
 **Artefacts.** *New document* in the tray, or `/artefact kind=file author="GCPD" subject="the girl on the roof"`. Same writer, same rendering, goes to the Library; nothing enters the story unless you bring it in or file it.
 
