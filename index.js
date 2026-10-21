@@ -40,8 +40,8 @@ const defaultSettings = {
     customKey: '',
     /** Temperature for the writer; blank leaves it to the endpoint's default. */
     temperature: '',
-    /** Max tokens for the writer's answer. */
-    maxTokens: 1500,
+    /** Max tokens for the writer's answer. Thinking models spend some of this on reasoning first. */
+    maxTokens: 4000,
     /** Depth of the one-turn world note. */
     depth: 0,
 };
@@ -83,7 +83,26 @@ export const writer = {
         const s = settings();
         const service = context.ChatCompletionService;
         const temperature = s.temperature === '' || s.temperature === null ? undefined : Number(s.temperature);
-        const unwrap = (result) => (typeof result === 'string' ? result : (result?.content ?? ''));
+        const unwrap = (result) => {
+            if (typeof result === 'string') {
+                return result;
+            }
+
+            const content = String(result?.content ?? '').trim();
+            const reasoning = String(result?.reasoning ?? '').trim();
+
+            if (!content && reasoning) {
+                // A thinking model that ran out of tokens, or put the answer in its reasoning. Try the reasoning.
+                console.warn(LOG, 'the writer answered with reasoning but no content; trying the reasoning text', { reasoningChars: reasoning.length });
+                return reasoning;
+            }
+
+            if (!content) {
+                console.warn(LOG, 'the writer answered with nothing', result);
+            }
+
+            return content;
+        };
 
         if (s.source === 'custom') {
             if (!s.customUrl || !s.customModel) {
@@ -129,6 +148,7 @@ export const writer = {
                     chat_completion_source: live.chat_completion_source,
                     max_tokens: maxTokens,
                     temperature,
+                    include_reasoning: false,
                     custom_url: live.custom_url,
                     custom_include_headers: live.custom_include_headers,
                     custom_include_body: live.custom_include_body,
@@ -239,11 +259,18 @@ async function produce({ mode, request, n }) {
         { role: 'system', content: systemPrompt({ mode, n, userName: context.name1 }) },
         { role: 'user', content: userPrompt({ reference: await referenceText(), story: storyText(s.recent), request }) },
     ];
-    const answer = await writer.call(messages, s.maxTokens);
-    const docs = parseDocuments(answer);
+    let answer = await writer.call(messages, s.maxTokens);
+    let docs = parseDocuments(answer);
+
+    if (!docs.length && !String(answer ?? '').trim()) {
+        // Empty answer: most often a thinking model that spent the whole budget reasoning. Once more, with room.
+        console.warn(LOG, `empty answer at ${s.maxTokens} tokens; retrying with ${s.maxTokens * 2}`);
+        answer = await writer.call(messages, s.maxTokens * 2);
+        docs = parseDocuments(answer);
+    }
 
     if (!docs.length) {
-        console.warn(LOG, 'the writer returned nothing usable:', String(answer).slice(0, 300));
+        console.warn(LOG, 'the writer returned nothing usable:', String(answer).slice(0, 600) || '<empty string>');
     }
 
     return docs;
@@ -1008,7 +1035,7 @@ function addSettingsPanel() {
                     <label>API key <input type="password" id="dsp-custom-key" class="text_pole" placeholder="optional; stored in your settings file"></label>
                 </div>
                 <label>Temperature <input type="text" id="dsp-temperature" class="text_pole dsp-num" placeholder="default"> (blank leaves the endpoint's default)</label>
-                <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="8000" class="text_pole dsp-num"></label>
+                <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="16000" class="text_pole dsp-num"></label>
                 <small>When in-fiction time passes (the reply's state comment moves its clock, or you write that time passed), the world writes what came into existence: a paper, a text, a note. The narrator is told only that it is within reach. Read it in the in-tray; bring it in if you want your character to have read it; file it to make it part of the chat's lorebook.</small>
             </div>
         </div>`;
@@ -1061,7 +1088,7 @@ function addSettingsPanel() {
     q('#dsp-threshold').addEventListener('change', (e) => { s.thresholdHours = Math.max(1, Number(e.target.value) || 3); e.target.value = s.thresholdHours; saveSettings(); });
     q('#dsp-count').addEventListener('change', (e) => { s.count = Math.max(1, Math.min(4, Number(e.target.value) || 1)); e.target.value = s.count; saveSettings(); });
     q('#dsp-recent').addEventListener('change', (e) => { s.recent = Math.max(2, Math.min(60, Number(e.target.value) || 12)); e.target.value = s.recent; saveSettings(); });
-    q('#dsp-tokens').addEventListener('change', (e) => { s.maxTokens = Math.max(300, Math.min(8000, Number(e.target.value) || 1500)); e.target.value = s.maxTokens; saveSettings(); });
+    q('#dsp-tokens').addEventListener('change', (e) => { s.maxTokens = Math.max(300, Math.min(16000, Number(e.target.value) || 4000)); e.target.value = s.maxTokens; saveSettings(); });
     profile.addEventListener('change', (e) => { s.profile = e.target.value; saveSettings(); });
 }
 
