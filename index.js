@@ -72,10 +72,24 @@ export const writer = {
     async call(messages, maxTokens) {
         const context = getContext();
         const s = settings();
+        const active = context.extensionSettings?.connectionManager?.selectedProfile ?? '';
+        const service = context.ConnectionManagerRequestService;
 
-        if (s.profile && context.ConnectionManagerRequestService) {
-            const result = await context.ConnectionManagerRequestService.sendRequest(s.profile, messages, maxTokens);
-            return typeof result === 'string' ? result : (result?.content ?? '');
+        // The live connection is the one that just produced the reply; use it unless a different profile was chosen.
+        if (s.profile && s.profile !== active && service) {
+            try {
+                const result = await service.sendRequest(s.profile, messages, maxTokens);
+                return typeof result === 'string' ? result : (result?.content ?? '');
+            } catch (withPreset) {
+                console.warn(LOG, 'profile request with its preset failed, retrying without the preset:', withPreset);
+
+                try {
+                    const result = await service.sendRequest(s.profile, messages, maxTokens, { includePreset: false, includeInstruct: false });
+                    return typeof result === 'string' ? result : (result?.content ?? '');
+                } catch (withoutPreset) {
+                    throw new Error(`profile "${profileName(s.profile)}": ${withPreset?.message ?? withPreset}; without its preset: ${withoutPreset?.message ?? withoutPreset}`);
+                }
+            }
         }
 
         const system = messages.find(m => m.role === 'system')?.content ?? '';
@@ -83,6 +97,11 @@ export const writer = {
         return await context.generateRaw({ prompt: rest, systemPrompt: system, responseLength: maxTokens });
     },
 };
+
+function profileName(id) {
+    const profiles = getContext().extensionSettings?.connectionManager?.profiles ?? [];
+    return profiles.find(p => p.id === id)?.name ?? id;
+}
 
 function cleanText(text) {
     return String(text ?? '').replace(STATE_BLOCKS, '').replace(/\n{3,}/g, '\n\n').trim();
@@ -919,7 +938,7 @@ function addSettingsPanel() {
                 <label>Time passed means at least <input type="number" id="dsp-threshold" min="1" max="720" class="text_pole dsp-num"> hours</label>
                 <label>Documents per dispatch <input type="number" id="dsp-count" min="1" max="4" class="text_pole dsp-num"></label>
                 <label>Recent messages the writer sees <input type="number" id="dsp-recent" min="2" max="60" class="text_pole dsp-num"></label>
-                <label>Writer's connection profile <select id="dsp-profile" class="text_pole"><option value="">main API</option></select></label>
+                <label>Writer's connection profile <select id="dsp-profile" class="text_pole"><option value="">main API (whatever the chat is using)</option></select></label>
                 <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="8000" class="text_pole dsp-num"></label>
                 <small>When in-fiction time passes (the reply's state comment moves its clock, or you write that time passed), the world writes what came into existence: a paper, a text, a note. The narrator is told only that it is within reach. Read it in the in-tray; bring it in if you want your character to have read it; file it to make it part of the chat's lorebook.</small>
             </div>
@@ -939,8 +958,10 @@ function addSettingsPanel() {
     try {
         const profiles = getContext().extensionSettings?.connectionManager?.profiles ?? [];
 
+        const active = getContext().extensionSettings?.connectionManager?.selectedProfile ?? '';
+
         for (const p of profiles) {
-            const option = element('option', null, p.name);
+            const option = element('option', null, p.id === active ? `${p.name} (active — same as main API)` : p.name);
             option.value = p.id;
             profile.appendChild(option);
         }
