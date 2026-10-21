@@ -48,9 +48,21 @@ const defaultSettings = {
     depth: 0,
 };
 
+/** The one settings object, kept in place so every reference to it stays live. Missing keys get defaults. */
 function settings() {
-    extension_settings[MODULE_NAME] = Object.assign({}, defaultSettings, extension_settings[MODULE_NAME] ?? {});
-    return extension_settings[MODULE_NAME];
+    if (!extension_settings[MODULE_NAME] || typeof extension_settings[MODULE_NAME] !== 'object') {
+        extension_settings[MODULE_NAME] = {};
+    }
+
+    const s = extension_settings[MODULE_NAME];
+
+    for (const [key, value] of Object.entries(defaultSettings)) {
+        if (!(key in s)) {
+            s[key] = value;
+        }
+    }
+
+    return s;
 }
 
 function saveSettings() {
