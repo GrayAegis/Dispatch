@@ -177,21 +177,47 @@ async function produce({ mode, request, n }) {
 /* ---------------------------------------------------------------- dispatches */
 
 let busy = false;
+let workingToast = null;
+
+/** A toast that stays up while the writer works, so a failure is recognisably Dispatch's and not the chat's. */
+function working(text) {
+    stopWorking();
+    workingToast = toastr.info(text, 'Dispatch is writing', { timeOut: 0, extendedTimeOut: 0, tapToDismiss: false, progressBar: false });
+}
+
+function stopWorking() {
+    if (workingToast) {
+        toastr.clear(workingToast);
+        workingToast = null;
+    }
+}
+
+function failed(error) {
+    const message = String(error?.message ?? error ?? 'unknown error');
+    console.error(LOG, 'writer failed:', error);
+    toastr.error(`The writer's request failed: ${message}. The chat itself is unaffected.`, 'Dispatch', { timeOut: 8000 });
+}
 
 async function dispatch(hours, { manual = false } = {}) {
     const s = settings();
     const data = store();
 
-    if (!data || busy) {
+    if (!data) {
+        return [];
+    }
+
+    if (busy) {
+        toastr.info('Still writing the last one.', 'Dispatch');
         return [];
     }
 
     busy = true;
     setStatus('writing…');
+    const span = hours >= 48 ? `${Math.round(hours / 24)} days` : hours >= 1 ? `${Math.round(hours)} hours` : 'a short while';
+    working(`About ${span} passed. Writing what the world produced…`);
 
     try {
         const place = currentPlace();
-        const span = hours >= 48 ? `${Math.round(hours / 24)} days` : hours >= 1 ? `${Math.round(hours)} hours` : 'a short while';
         const request = `Time that just passed: about ${span}.${place ? ` ${getContext().name1} is now at: ${place}.` : ''} Produce the documents that came into existence in that time and could be encountered here.`;
         const docs = await produce({ mode: 'dispatch', request, n: Math.max(1, Math.min(4, Number(s.count) || 1)) });
         const index = (getContext().chat?.length ?? 1) - 1;
@@ -212,10 +238,10 @@ async function dispatch(hours, { manual = false } = {}) {
         refreshBadge();
         return docs;
     } catch (error) {
-        console.error(LOG, error);
-        toastr.error(String(error?.message ?? error), 'Dispatch');
+        failed(error);
         return [];
     } finally {
+        stopWorking();
         busy = false;
         setStatus('');
     }
@@ -335,12 +361,18 @@ async function onReply(messageId) {
 async function artefact({ kind, author, subject, notes }) {
     const data = store();
 
-    if (!data || busy) {
+    if (!data) {
+        return null;
+    }
+
+    if (busy) {
+        toastr.info('Still writing the last one.', 'Dispatch');
         return null;
     }
 
     busy = true;
     setStatus('writing…');
+    working(`Writing a ${KINDS[kind]?.label.toLowerCase() ?? kind}…`);
 
     try {
         const request = [
@@ -364,10 +396,10 @@ async function artefact({ kind, author, subject, notes }) {
         refreshBadge();
         return item;
     } catch (error) {
-        console.error(LOG, error);
-        toastr.error(String(error?.message ?? error), 'Dispatch');
+        failed(error);
         return null;
     } finally {
+        stopWorking();
         busy = false;
         setStatus('');
     }
