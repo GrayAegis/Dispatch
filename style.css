@@ -55,6 +55,7 @@
 .dsp-settings label { display: block; margin: 4px 0; }
 .dsp-settings small { display: block; opacity: 0.75; margin-top: 6px; }
 .dsp-num { width: 5em; display: inline-block; margin: 0 4px; }
+.dsp-buttons { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .dsp-sub { margin: 2px 0 6px 14px; padding-left: 8px; border-left: 2px solid var(--SmartThemeBorderColor); }
 
 /* ---- documents: each kind is a page ---- */

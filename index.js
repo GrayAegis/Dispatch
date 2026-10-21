@@ -1041,6 +1041,11 @@ function addSettingsPanel() {
                 </div>
                 <label>Temperature <input type="text" id="dsp-temperature" class="text_pole dsp-num" placeholder="default"> (blank leaves the endpoint's default)</label>
                 <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="16000" class="text_pole dsp-num"></label>
+                <div class="dsp-buttons">
+                    <button id="dsp-save" class="menu_button">Save settings</button>
+                    <button id="dsp-test" class="menu_button">Test the writer</button>
+                    <span id="dsp-test-result" class="dsp-muted"></span>
+                </div>
                 <small>When in-fiction time passes (the reply's state comment moves its clock, or you write that time passed), the world writes what came into existence: a paper, a text, a note. The narrator is told only that it is within reach. Read it in the in-tray; bring it in if you want your character to have read it; file it to make it part of the chat's lorebook.</small>
             </div>
         </div>`;
@@ -1082,6 +1087,48 @@ function addSettingsPanel() {
     };
 
     showSub();
+
+    const readAll = () => {
+        s.enabled = q('#dsp-enabled').checked;
+        s.auto = q('#dsp-auto').checked;
+        s.thresholdHours = Math.max(1, Number(q('#dsp-threshold').value) || 3);
+        s.count = Math.max(1, Math.min(4, Number(q('#dsp-count').value) || 1));
+        s.recent = Math.max(2, Math.min(60, Number(q('#dsp-recent').value) || 12));
+        s.maxTokens = Math.max(300, Math.min(16000, Number(q('#dsp-tokens').value) || 4000));
+        s.source = source.value;
+        s.profile = profile.value;
+        s.customUrl = q('#dsp-custom-url').value.trim();
+        s.customModel = q('#dsp-custom-model').value.trim();
+        s.customKey = q('#dsp-custom-key').value.trim();
+        const t = q('#dsp-temperature').value.trim();
+        s.temperature = t === '' || Number.isNaN(Number(t)) ? '' : Number(t);
+        saveSettings();
+    };
+
+    q('#dsp-save').addEventListener('click', () => {
+        readAll();
+        toastr.success('Saved.', 'Dispatch');
+    });
+
+    q('#dsp-test').addEventListener('click', async () => {
+        readAll();
+        const out = q('#dsp-test-result');
+        const button = q('#dsp-test');
+        button.disabled = true;
+        out.textContent = 'asking…';
+
+        try {
+            const started = Date.now();
+            const answer = await writer.call([{ role: 'user', content: 'Reply with the single word OK and nothing else.' }], 50);
+            const text = String(answer ?? '').trim();
+            out.textContent = text ? `answered in ${((Date.now() - started) / 1000).toFixed(1)}s: "${text.slice(0, 60)}"` : 'connected, but the answer was empty (a thinking model with no room? raise max tokens)';
+        } catch (error) {
+            out.textContent = `failed: ${error?.message ?? error}`;
+        } finally {
+            button.disabled = false;
+        }
+    });
+
     source.addEventListener('change', () => { s.source = source.value; saveSettings(); showSub(); });
     q('#dsp-custom-url').addEventListener('change', (e) => { s.customUrl = e.target.value.trim(); saveSettings(); });
     q('#dsp-custom-model').addEventListener('change', (e) => { s.customModel = e.target.value.trim(); saveSettings(); });
