@@ -4,7 +4,7 @@
  * narrator is told only that they are there; you read them if you want, and bring one into the
  * scene only when you choose. Artefacts are the same documents made to order from a menu.
  */
-import { eventSource, event_types, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
+import { eventSource, event_types, extension_prompt_types, extension_prompt_roles, saveSettings as saveSettingsNow } from '../../../../script.js';
 import { extension_settings, getContext } from '../../../extensions.js';
 import { oai_settings, getChatCompletionModel } from '../../../openai.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
@@ -42,6 +42,8 @@ const defaultSettings = {
     customBody: '',
     /** Temperature for the writer; blank leaves it to the endpoint's default. */
     temperature: '',
+    /** Console logging: 'normal' (events and errors), 'verbose' (also the full request and the raw answer). */
+    logging: 'normal',
     /** Max tokens for the writer's answer. Thinking models spend some of this on reasoning first. */
     maxTokens: 4000,
     /** Depth of the one-turn world note. */
@@ -67,6 +69,13 @@ function settings() {
 
 function saveSettings() {
     getContext().saveSettingsDebounced();
+}
+
+/** Extra detail in the console when logging is set to verbose. Secrets are never printed. */
+function verbose(label, value) {
+    if (settings().logging === 'verbose') {
+        console.info(LOG, label, value);
+    }
 }
 
 /** Toasts, also written to the console so they can be read after they fade. */
@@ -105,6 +114,15 @@ export const writer = {
         const s = settings();
         const service = context.ChatCompletionService;
         const temperature = s.temperature === '' || s.temperature === null ? undefined : Number(s.temperature);
+        verbose('writer request', {
+            route: s.source,
+            model: s.source === 'custom' ? s.customModel : s.source === 'profile' ? profileName(s.profile) : getChatCompletionModel(),
+            endpoint: s.source === 'custom' ? s.customUrl : s.source === 'profile' ? '(profile)' : oai_settings.chat_completion_source,
+            maxTokens,
+            temperature,
+            extraBody: s.source === 'custom' ? (s.customBody || null) : null,
+            messages,
+        });
         const unwrap = (result) => {
             if (typeof result === 'string') {
                 return result;
@@ -112,8 +130,8 @@ export const writer = {
 
             const content = String(result?.content ?? '').trim();
             const reasoning = String(result?.reasoning ?? '').trim();
-
             writer.lastReasoning = reasoning;
+            verbose('writer answer', { contentChars: content.length, reasoningChars: reasoning.length, content, reasoning });
 
             if (!content) {
                 console.warn(LOG, reasoning ? `the writer answered with ${reasoning.length} chars of reasoning but no content` : 'the writer answered with nothing', result);
@@ -190,7 +208,9 @@ export const writer = {
 
         const system = messages.find(m => m.role === 'system')?.content ?? '';
         const rest = messages.filter(m => m.role !== 'system');
-        return await context.generateRaw({ prompt: rest, systemPrompt: system, responseLength: maxTokens });
+        const raw = await context.generateRaw({ prompt: rest, systemPrompt: system, responseLength: maxTokens });
+        verbose('writer answer (raw generation)', raw);
+        return raw;
     },
 };
 
@@ -281,6 +301,7 @@ async function produce({ mode, request, n }) {
     ];
     let answer = await writer.call(messages, s.maxTokens);
     let docs = parseDocuments(answer);
+    verbose('parsed documents', docs);
 
     if (!docs.length && !String(answer ?? '').trim()) {
         // No content: most often a thinking model that spent the whole budget reasoning. Once more, with room.
@@ -1071,6 +1092,12 @@ function addSettingsPanel() {
                 </div>
                 <label>Temperature <input type="text" id="dsp-temperature" class="text_pole dsp-num" placeholder="default"> (blank leaves the endpoint's default)</label>
                 <label>Max tokens for the writer <input type="number" id="dsp-tokens" min="300" max="16000" class="text_pole dsp-num"></label>
+                <label>Console logging
+                    <select id="dsp-logging" class="text_pole dsp-select">
+                        <option value="normal">normal: events and errors</option>
+                        <option value="verbose">verbose: also the full request and the raw answer</option>
+                    </select>
+                </label>
                 <div class="dsp-buttons">
                     <button id="dsp-save" class="menu_button">Save settings</button>
                     <button id="dsp-test" class="menu_button">Test the writer</button>
@@ -1111,6 +1138,7 @@ function addSettingsPanel() {
     q('#dsp-custom-key').value = s.customKey;
     q('#dsp-custom-body').value = s.customBody;
     q('#dsp-temperature').value = s.temperature;
+    q('#dsp-logging').value = s.logging;
 
     const showSub = () => {
         q('#dsp-source-profile').style.display = source.value === 'profile' ? '' : 'none';
@@ -1134,11 +1162,13 @@ function addSettingsPanel() {
         s.customBody = q('#dsp-custom-body').value.trim();
         const t = q('#dsp-temperature').value.trim();
         s.temperature = t === '' || Number.isNaN(Number(t)) ? '' : Number(t);
+        s.logging = q('#dsp-logging').value;
         saveSettings();
     };
 
-    q('#dsp-save').addEventListener('click', () => {
+    q('#dsp-save').addEventListener('click', async () => {
         readAll();
+        await saveSettingsNow();
         notify.success('Saved.');
     });
 
@@ -1174,6 +1204,7 @@ function addSettingsPanel() {
     q('#dsp-custom-model').addEventListener('change', (e) => { s.customModel = e.target.value.trim(); saveSettings(); });
     q('#dsp-custom-key').addEventListener('change', (e) => { s.customKey = e.target.value.trim(); saveSettings(); });
     q('#dsp-custom-body').addEventListener('change', (e) => { s.customBody = e.target.value.trim(); saveSettings(); });
+    q('#dsp-logging').addEventListener('change', (e) => { s.logging = e.target.value; saveSettings(); });
     q('#dsp-temperature').addEventListener('change', (e) => { const v = e.target.value.trim(); s.temperature = v === '' || Number.isNaN(Number(v)) ? '' : Number(v); e.target.value = s.temperature; saveSettings(); });
 
     q('#dsp-enabled').addEventListener('change', (e) => { s.enabled = e.target.checked; saveSettings(); applyWorldNote(); applyReadNote(); });
