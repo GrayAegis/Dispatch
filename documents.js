@@ -99,6 +99,102 @@ export function kindsFor(year) {
     return out;
 }
 
+/** A kind key from a label: lower case, letters and digits, not one already taken. */
+export function kindKey(label, taken = []) {
+    const base = String(label ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 30) || 'kind';
+    const used = new Set([...KIND_KEYS, ...taken]);
+    let key = base;
+
+    for (let i = 2; used.has(key); i++) {
+        key = `${base}_${i}`;
+    }
+
+    return key;
+}
+
+/**
+ * The kinds a chat can use: the built-in ones that exist in `year`, less those switched `off` for the
+ * chat, plus the `custom` kinds switched `on` for it. Custom kinds are the user's own say about the
+ * world, so the year never removes them.
+ */
+export function availableKinds({ year = null, off = [], on = [], custom = [] } = {}) {
+    const out = {};
+
+    for (const [key, kind] of Object.entries(kindsFor(year))) {
+        if (!off.includes(key)) {
+            out[key] = kind;
+        }
+    }
+
+    for (const kind of custom) {
+        if (kind?.key && kind.label && on.includes(kind.key) && !KINDS[kind.key]) {
+            out[kind.key] = {
+                label: kind.label,
+                icon: kind.icon || 'fa-file-lines',
+                guide: String(kind.guide ?? '').trim() || `A ${kind.label}, written the way one would be in this world.`,
+                found: String(kind.found ?? '').trim() || 'wherever such a thing would turn up',
+                look: KINDS[kind.look] ? kind.look : 'plain',
+                custom: true,
+            };
+        }
+    }
+
+    return out;
+}
+
+/**
+ * Hold documents to the kinds a chat can use: drop the rest, and give each the name its kind has here
+ * (an era's name for a built-in kind; the label, icon and look of a custom one). Returns { kept, dropped }.
+ */
+export function holdToKinds(docs, available) {
+    const kept = [];
+    const dropped = [];
+
+    for (const doc of docs) {
+        const kind = available[doc.kind];
+        const base = KINDS[doc.kind];
+
+        if (!kind) {
+            dropped.push(doc);
+            continue;
+        }
+
+        if (!base) {
+            // Kept on the document itself, so it still reads and renders if the kind is later deleted.
+            doc.label = kind.label;
+            doc.icon = kind.icon;
+            doc.look = kind.look;
+
+            if (doc.source === doc.kind) {
+                doc.source = kind.label;
+            }
+        } else if (kind.label !== base.label) {
+            doc.label = kind.label;
+
+            if (doc.source === base.label) {
+                doc.source = kind.label;
+            }
+        }
+
+        kept.push(doc);
+    }
+
+    return { kept, dropped };
+}
+
+/**
+ * The writer's memory of what it has already produced: one line each for the most recent `limit`
+ * documents (`items` is newest first), with the start of the body. Empty when there are none.
+ */
+export function earlierDocuments(items, { limit = 8, gistChars = 240 } = {}) {
+    return (items ?? []).slice(0, Math.max(0, limit)).reverse().map((doc) => {
+        const people = [doc.from ? `by ${doc.from}` : null, doc.to ? `to ${doc.to}` : null].filter(Boolean).join(', ');
+        const body = String(doc.body ?? '').replace(/\s+/g, ' ').trim();
+        const gist = body.length > gistChars ? body.slice(0, gistChars).replace(/\s+\S*$/, '') + '…' : body;
+        return `- [${kindLabel(doc)}] ${doc.source}${doc.date ? `, ${doc.date}` : ''}${doc.title ? ` — "${doc.title}"` : ''}${people ? ` (${people})` : ''}: ${gist}`;
+    }).join('\n');
+}
+
 /** What a document's kind is called, allowing for the era it was written in. */
 export function kindLabel(doc) {
     return doc?.label || KINDS[doc?.kind]?.label || doc?.kind;
@@ -109,30 +205,7 @@ export function kindLabel(doc) {
  * Returns { kept, dropped }.
  */
 export function holdToPeriod(docs, period) {
-    const available = kindsFor(period?.year);
-    const kept = [];
-    const dropped = [];
-
-    for (const doc of docs) {
-        const kind = available[doc.kind];
-
-        if (!kind) {
-            dropped.push(doc);
-            continue;
-        }
-
-        if (kind.label !== KINDS[doc.kind].label) {
-            doc.label = kind.label;
-
-            if (doc.source === KINDS[doc.kind].label) {
-                doc.source = kind.label;
-            }
-        }
-
-        kept.push(doc);
-    }
-
-    return { kept, dropped };
+    return holdToKinds(docs, kindsFor(period?.year));
 }
 
 /** The rule that holds the writer to the story's period. */
@@ -145,9 +218,11 @@ function periodRule(period) {
     return `\n- Period lock: the story is set in ${period.text}. Every document must be one that could exist then: its medium, how it is delivered and found, its layout, wording, slang, brands, prices, and every reference in it. Nothing invented or popularised later appears, even in passing. Only the kinds listed below exist; never produce any other.${unknownYear} The one exception is technology the reference material or the story itself establishes for this world.`;
 }
 
-/** The system instruction for making documents. `n` documents; `mode` is 'dispatch' or 'artefact'. `period` is { text, year } or null. */
-export function systemPrompt({ mode, n, userName, period = null }) {
-    const available = kindsFor(period?.year);
+/**
+ * The system instruction for making documents. `n` documents; `mode` is 'dispatch' or 'artefact'.
+ * `period` is { text, year } or null; `kinds` is the map of kinds this chat can use.
+ */
+export function systemPrompt({ mode, n, userName, period = null, kinds: available = kindsFor(period?.year) }) {
     const kinds = Object.keys(available).map(k => `- ${k}: ${available[k].guide} Where found: ${available[k].found}.`).join('\n');
     const base = `You produce documents that exist inside a story's world. You are not the narrator and you do not continue the story; you write the things that would exist in the world at this point in it: what a newspaper printed, what someone sent, what a file says.
 
@@ -157,7 +232,8 @@ Rules:
 - Information travels the way it would: a paper knows what a reporter could learn; a text knows what the sender knows; a file knows what the institution recorded. Get things slightly wrong the way the world would, and never reveal what nobody could know.
 - Never write ${userName}'s dialogue, thoughts, decisions, or replies. ${userName} may be the subject of a document, never its author, unless explicitly asked for a document ${userName} already wrote in the story.
 - Match register to source: a tabloid is not a broadsheet, a cop's file is not a doctor's, a teenager's text is not a lawyer's letter.
-- Keep each document the length its kind allows.${periodRule(period)}
+- Keep each document the length its kind allows.
+- Documents listed as earlier documents already exist in this world. Stay consistent with them: a source keeps its name, its people, and its voice. A new document may follow one up, correct it, answer it, or dispute it, as its own source would. Never repeat one or restate what it said.${periodRule(period)}
 
 Kinds:
 ${kinds}
@@ -174,11 +250,15 @@ Answer with a JSON array and nothing else. Each item:
 }
 
 /** The user-turn content: reference material, recent story, and the request. */
-export function userPrompt({ reference, story, request }) {
+export function userPrompt({ reference, story, request, earlier = '' }) {
     const parts = [];
 
     if (reference) {
         parts.push(`<reference>\n${reference}\n</reference>`);
+    }
+
+    if (earlier) {
+        parts.push(`<earlier_documents>\n${earlier}\n</earlier_documents>`);
     }
 
     parts.push(`<story_so_far>\n${story}\n</story_so_far>`);
@@ -187,7 +267,8 @@ export function userPrompt({ reference, story, request }) {
 }
 
 /** Pull a JSON array out of the model's answer, tolerating fences and stray text. */
-export function parseDocuments(text) {
+export function parseDocuments(text, kindKeys = KIND_KEYS) {
+    const tryParse = (candidate) => tryParseWith(candidate, kindKeys);
     const raw = String(text ?? '').trim();
     const candidates = [];
     const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(raw);
@@ -223,11 +304,11 @@ export function parseDocuments(text) {
     return salvaged.length ? salvaged : [];
 }
 
-function tryParse(text) {
+function tryParseWith(text, kindKeys) {
     try {
         const value = JSON.parse(text);
         const list = Array.isArray(value) ? value : [value];
-        return list.map(normalise).filter(Boolean);
+        return list.map(raw => normalise(raw, kindKeys)).filter(Boolean);
     } catch {
         return null;
     }
@@ -315,7 +396,7 @@ function balancedObjects(text) {
     return found;
 }
 
-function normalise(raw) {
+function normalise(raw, kindKeys = KIND_KEYS) {
     if (!raw || typeof raw !== 'object') {
         return null;
     }
@@ -326,10 +407,11 @@ function normalise(raw) {
         return null;
     }
 
-    const kind = KIND_KEYS.includes(String(raw.kind).toLowerCase()) ? String(raw.kind).toLowerCase() : 'note';
+    const wanted = String(raw.kind).toLowerCase().trim();
+    const kind = kindKeys.includes(wanted) || KIND_KEYS.includes(wanted) ? wanted : 'note';
     return {
         kind,
-        source: String(raw.source ?? raw.outlet ?? raw.sender ?? '').trim() || KINDS[kind].label,
+        source: String(raw.source ?? raw.outlet ?? raw.sender ?? '').trim() || (KINDS[kind]?.label ?? kind),
         title: String(raw.title ?? raw.headline ?? raw.subject ?? '').trim(),
         date: String(raw.date ?? raw.time ?? '').trim(),
         from: raw.from ? String(raw.from).trim() : null,
@@ -488,9 +570,11 @@ function paragraphs(container, body, className = 'dsp-p') {
 
 /** Render a document as a styled page element. */
 export function render(doc, userName) {
-    const page = el('div', `dsp-doc dsp-${doc.kind}`);
+    // A custom kind borrows the look of a built-in one, or gets a plain page.
+    const look = KINDS[doc.kind] ? doc.kind : KINDS[doc.look] ? doc.look : 'plain';
+    const page = el('div', `dsp-doc dsp-${look}`);
 
-    switch (doc.kind) {
+    switch (look) {
         case 'article': {
             const masthead = el('div', 'dsp-masthead', doc.source);
             page.appendChild(masthead);
@@ -653,8 +737,26 @@ export function render(doc, userName) {
             break;
         }
 
-        default:
+        default: {
+            const head = el('div', 'dsp-plain-head');
+            head.appendChild(el('span', 'dsp-plain-source', doc.source));
+            head.appendChild(el('span', 'dsp-plain-date', doc.date));
+            page.appendChild(head);
+
+            if (doc.title) {
+                page.appendChild(el('div', 'dsp-plain-title', doc.title));
+            }
+
+            if (doc.to) {
+                page.appendChild(el('div', 'dsp-plain-to', `To ${doc.to}`));
+            }
+
             paragraphs(page, doc.body);
+
+            if (doc.from) {
+                page.appendChild(el('div', 'dsp-plain-sign', doc.from));
+            }
+        }
     }
 
     return page;

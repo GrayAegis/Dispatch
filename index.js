@@ -12,7 +12,7 @@ import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.j
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { elapsed, timeLine } from './time.js';
-import { KINDS, KIND_KEYS, holdToPeriod, kindLabel, kindsFor, lorebookKeys, parseDocuments, plainText, recall, render, summary, systemPrompt, userPrompt } from './documents.js';
+import { KINDS, KIND_KEYS, availableKinds, earlierDocuments, holdToKinds, kindKey, kindLabel, kindsFor, lorebookKeys, parseDocuments, plainText, recall, render, summary, systemPrompt, userPrompt } from './documents.js';
 import { resolvePeriod } from './period.js';
 
 const MODULE_NAME = 'dispatch';
@@ -60,6 +60,10 @@ const defaultSettings = {
     recallScan: 4,
     /** Depth the kept documents are inserted at. */
     recallDepth: 4,
+    /** Earlier documents the writer is shown, so new ones stay consistent with them. 0 shows none. */
+    memoryCount: 8,
+    /** Your own kinds: { key, label, guide, found, look }. Switched on per chat in the tray's Kinds tab. */
+    customKinds: [],
 };
 
 /** The one settings object, kept in place so every reference to it stays live. Missing keys get defaults. */
@@ -72,7 +76,7 @@ function settings() {
 
     for (const [key, value] of Object.entries(defaultSettings)) {
         if (!(key in s)) {
-            s[key] = value;
+            s[key] = Array.isArray(value) ? [] : value;
         }
     }
 
@@ -122,6 +126,15 @@ function saveStore() {
 function period() {
     const data = store();
     return resolvePeriod({ setting: data?.period, clock: data?.lastTime });
+}
+
+/**
+ * The kinds this chat can use: built-in ones that exist in its period and are not switched off here,
+ * plus your own kinds switched on here.
+ */
+function chatKinds() {
+    const data = store();
+    return availableKinds({ year: period()?.year, off: data?.kindsOff ?? [], on: data?.kindsOn ?? [], custom: settings().customKinds ?? [] });
 }
 
 /** One line on what the period lock is doing, for the tray. */
@@ -340,30 +353,40 @@ async function produce({ mode, request, n }) {
     const context = getContext();
     const s = settings();
     const lock = period();
+    const kinds = chatKinds();
+    const kindKeys = Object.keys(kinds);
+
+    if (!kindKeys.length) {
+        notify.warning('Every kind is switched off for this chat. Turn some on in the tray\'s Kinds tab.');
+        return [];
+    }
+
+    const earlier = earlierDocuments(store()?.items ?? [], { limit: Math.max(0, Number(s.memoryCount) || 0) });
     const messages = [
-        { role: 'system', content: systemPrompt({ mode, n, userName: context.name1, period: lock }) },
-        { role: 'user', content: userPrompt({ reference: await referenceText(), story: storyText(s.recent), request }) },
+        { role: 'system', content: systemPrompt({ mode, n, userName: context.name1, period: lock, kinds }) },
+        { role: 'user', content: userPrompt({ reference: await referenceText(), story: storyText(s.recent), request, earlier }) },
     ];
     let answer = await writer.call(messages, s.maxTokens);
-    let docs = parseDocuments(answer);
+    let docs = parseDocuments(answer, kindKeys);
     verbose('parsed documents', docs);
 
-    if (lock && docs.length) {
+    if (docs.length) {
         // The writer was not offered these kinds; if it produced one anyway, ask once more, then go without.
-        let held = holdToPeriod(docs, lock);
+        let held = holdToKinds(docs, kinds);
 
         if (held.dropped.length) {
             const wrong = [...new Set(held.dropped.map(d => d.kind))].join(', ');
-            console.warn(LOG, `period lock (${lock.text}): the writer produced ${wrong}; asking again`);
-            const again = [...messages, { role: 'assistant', content: String(answer ?? '') }, { role: 'user', content: `The story is set in ${lock.text}. These kinds do not exist then: ${wrong}. Answer again with the same number of documents, using only: ${Object.keys(kindsFor(lock.year)).join(', ')}.` }];
-            const retry = parseDocuments(await writer.call(again, s.maxTokens));
+            const why = lock ? `The story is set in ${lock.text}. These kinds do not exist in it` : 'These kinds do not exist in this story';
+            console.warn(LOG, `the writer produced a kind this chat does not use (${wrong}); asking again`);
+            const again = [...messages, { role: 'assistant', content: String(answer ?? '') }, { role: 'user', content: `${why}: ${wrong}. Answer again with the same number of documents, using only: ${kindKeys.join(', ')}.` }];
+            const retry = parseDocuments(await writer.call(again, s.maxTokens), kindKeys);
 
             if (retry.length) {
-                held = holdToPeriod(retry, lock);
+                held = holdToKinds(retry, kinds);
             }
 
             if (held.dropped.length) {
-                console.warn(LOG, `period lock (${lock.text}): discarded ${held.dropped.length} document(s) of a kind that does not exist then`);
+                console.warn(LOG, `discarded ${held.dropped.length} document(s) of a kind this chat does not use`);
             }
         }
 
@@ -483,7 +506,7 @@ function applyWorldNote() {
     }
 
     const lock = period();
-    const kinds = kindsFor(lock?.year);
+    const kinds = chatKinds();
     const lines = pending.map(item => `- ${item.found || (kinds[item.kind] ?? KINDS[item.kind])?.found}: ${summary(item)}.`);
     const detail = lock
         ? `in the scene's own texture. The story is set in ${lock.text}: each is come across only by means that exist then, and nothing later appears`
@@ -649,14 +672,19 @@ async function artefact({ kind, author, subject, notes }) {
     }
 
     const lock = period();
-    const era = kindsFor(lock?.year)[kind];
+    const kinds = chatKinds();
+    const era = kinds[kind];
 
-    if (KINDS[kind] && !era) {
-        notify.warning(`A ${KINDS[kind].label.toLowerCase()} does not exist in ${lock.text}. Change the period in the tray, or set it to "off", to write one anyway.`, { timeOut: 8000 });
+    if (!era) {
+        const name = KINDS[kind]?.label.toLowerCase() ?? `"${kind}"`;
+        const why = KINDS[kind] && lock && !kindsFor(lock.year)[kind]
+            ? `does not exist in ${lock.text}. Change the period in the tray, or set it to "off", to write one anyway`
+            : 'is not a kind this chat uses. Switch it on in the tray\'s Kinds tab';
+        notify.warning(`A ${name} ${why}.`, { timeOut: 8000 });
         return null;
     }
 
-    const label = (era ?? KINDS[kind])?.label.toLowerCase() ?? kind;
+    const label = era.label.toLowerCase();
     busy = true;
     setStatus('writing…');
     working(`Writing: ${label}…`);
@@ -676,8 +704,8 @@ async function artefact({ kind, author, subject, notes }) {
             return null;
         }
 
-        doc.kind = KIND_KEYS.includes(kind) ? kind : doc.kind;
-        holdToPeriod([doc], lock);
+        doc.kind = kind;
+        holdToKinds([doc], kinds);
         const item = { id: uid(), origin: 'artefact', status: 'read', mentioned: true, at: (getContext().chat?.length ?? 1) - 1, ...doc };
         data.items.unshift(item);
         saveStore();
@@ -976,7 +1004,7 @@ function draw(root) {
     const head = element('div', 'dsp-head');
     const tabs = element('div', 'dsp-tabs');
 
-    for (const [key, label] of [['tray', 'In-tray'], ['library', 'Library'], ['new', 'New document'], ['time', 'Time passed']]) {
+    for (const [key, label] of [['tray', 'In-tray'], ['library', 'Library'], ['new', 'New document'], ['time', 'Time passed'], ['kinds', 'Kinds']]) {
         const tab = element('span', 'dsp-tab' + (view.tab === key ? ' dsp-tab-on' : ''), label);
 
         if (key === 'tray' && unreadCount()) {
@@ -1035,7 +1063,159 @@ function draw(root) {
         case 'time':
             drawTimeForm(body);
             break;
+        case 'kinds':
+            drawKinds(body);
+            break;
     }
+}
+
+/** Which kinds this chat uses, and your own kinds: add, edit, delete. */
+let editingKind = null;
+
+function drawKinds(body) {
+    const data = store();
+    const s = settings();
+    const lock = period();
+    const inPeriod = kindsFor(lock?.year);
+    data.kindsOff ??= [];
+    data.kindsOn ??= [];
+
+    body.appendChild(element('p', 'dsp-muted', 'What the world can produce in this chat. Built-in kinds are on unless you switch them off here; your own kinds are off until you switch them on. Both choices are kept with the chat.'));
+    const list = element('div', 'dsp-kinds');
+
+    const toggle = (array, key, present) => {
+        const at = array.indexOf(key);
+
+        if (present && at < 0) {
+            array.push(key);
+        } else if (!present && at >= 0) {
+            array.splice(at, 1);
+        }
+
+        saveStore();
+        redraw();
+    };
+
+    for (const key of KIND_KEYS) {
+        const row = element('div', 'dsp-kind-row' + (inPeriod[key] ? '' : ' dsp-kind-gone'));
+        const label = element('label');
+        const box = element('input');
+        box.type = 'checkbox';
+        box.checked = Boolean(inPeriod[key]) && !data.kindsOff.includes(key);
+        box.disabled = !inPeriod[key];
+        box.addEventListener('change', () => toggle(data.kindsOff, key, !box.checked));
+        label.appendChild(box);
+        label.appendChild(element('span', null, (inPeriod[key] ?? KINDS[key]).label));
+        row.appendChild(label);
+
+        if (!inPeriod[key]) {
+            row.appendChild(element('span', 'dsp-kind-note', `does not exist in ${lock.text}`));
+        }
+
+        list.appendChild(row);
+    }
+
+    for (const kind of s.customKinds) {
+        const row = element('div', 'dsp-kind-row');
+        const label = element('label');
+        const box = element('input');
+        box.type = 'checkbox';
+        box.checked = data.kindsOn.includes(kind.key);
+        box.addEventListener('change', () => toggle(data.kindsOn, kind.key, box.checked));
+        label.appendChild(box);
+        label.appendChild(element('span', null, kind.label));
+        label.appendChild(element('span', 'dsp-kind-note', `yours · ${kind.key}`));
+        row.appendChild(label);
+        const edit = element('span', 'dsp-link', 'edit');
+        edit.addEventListener('click', () => { editingKind = kind.key; redraw(); });
+        row.appendChild(edit);
+        const remove = element('span', 'dsp-link', 'delete');
+        remove.addEventListener('click', async () => {
+            const answer = await new Popup(`Delete your kind "${kind.label}" from every chat? Documents already written keep their text and name.`, POPUP_TYPE.CONFIRM, '', { okButton: 'Delete' }).show();
+
+            if (answer !== 1 && answer !== true) {
+                return;
+            }
+
+            s.customKinds.splice(s.customKinds.indexOf(kind), 1);
+            editingKind = editingKind === kind.key ? null : editingKind;
+            saveSettings();
+            redraw();
+        });
+        row.appendChild(remove);
+        list.appendChild(row);
+    }
+
+    body.appendChild(list);
+
+    const current = s.customKinds.find(k => k.key === editingKind) ?? null;
+    const form = element('div', 'dsp-form');
+    form.appendChild(element('b', null, current ? `Edit "${current.label}"` : 'Add your own kind'));
+    const name = element('input', 'text_pole');
+    name.placeholder = 'Name (Scroll message, linkpearl call, telegram, guild notice)';
+    name.value = current?.label ?? '';
+    const guide = element('textarea', 'text_pole');
+    guide.rows = 3;
+    guide.placeholder = 'What it is and what one contains: who sends it, its parts, its voice, how long. (A message on a Scroll: sender, three to six short lines with times, in the sender\'s own voice.)';
+    guide.value = current?.guide ?? '';
+    const found = element('input', 'text_pole');
+    found.placeholder = 'How it is come across (the Scroll chiming, a message seen after class)';
+    found.value = current?.found ?? '';
+    const look = element('select', 'text_pole');
+
+    for (const [value, text] of [['plain', 'a plain page'], ...KIND_KEYS.map(k => [k, `like a ${KINDS[k].label.toLowerCase()}`])]) {
+        const option = element('option', null, text);
+        option.value = value;
+        look.appendChild(option);
+    }
+
+    look.value = current?.look ?? 'plain';
+
+    const row = (label, field) => {
+        const r = element('label', 'dsp-field');
+        r.appendChild(element('span', 'dsp-field-label', label));
+        r.appendChild(field);
+        return r;
+    };
+
+    form.appendChild(row('Name', name));
+    form.appendChild(row('What it is', guide));
+    form.appendChild(row('Where found', found));
+    form.appendChild(row('Looks', look));
+    const buttons = element('div', 'dsp-buttons');
+    const save = element('button', 'menu_button', current ? 'Save changes' : 'Add kind');
+    save.addEventListener('click', () => {
+        const label = name.value.trim();
+
+        if (!label || !guide.value.trim()) {
+            notify.warning('A kind needs a name and a line on what it is.');
+            return;
+        }
+
+        if (current) {
+            Object.assign(current, { label, guide: guide.value.trim(), found: found.value.trim(), look: look.value });
+        } else {
+            const key = kindKey(label, s.customKinds.map(k => k.key));
+            s.customKinds.push({ key, label, guide: guide.value.trim(), found: found.value.trim(), look: look.value });
+            data.kindsOn.push(key);
+            saveStore();
+        }
+
+        editingKind = null;
+        saveSettings();
+        redraw();
+    });
+    buttons.appendChild(save);
+
+    if (current) {
+        const cancel = element('button', 'menu_button', 'Cancel');
+        cancel.addEventListener('click', () => { editingKind = null; redraw(); });
+        buttons.appendChild(cancel);
+    }
+
+    form.appendChild(buttons);
+    form.appendChild(element('p', 'dsp-muted', 'A new kind is switched on for this chat and off everywhere else. Your kinds are yours to place: the period lock never removes them.'));
+    body.appendChild(form);
 }
 
 /** The period this chat is held to: a field for it and a line on what it is doing. Kept per chat. */
@@ -1069,7 +1249,7 @@ function drawList(body, items, emptyText) {
 
     for (const item of items) {
         const row = element('div', 'dsp-row' + (item.status === 'unread' ? ' dsp-unread' : ''));
-        const icon = element('span', 'fa-solid ' + (KINDS[item.kind]?.icon ?? 'fa-file') + ' dsp-row-icon');
+        const icon = element('span', 'fa-solid ' + (KINDS[item.kind]?.icon ?? item.icon ?? 'fa-file') + ' dsp-row-icon');
         row.appendChild(icon);
         const text = element('div', 'dsp-row-text');
         text.appendChild(element('div', 'dsp-row-title', item.title || item.source));
@@ -1212,7 +1392,7 @@ function drawNewForm(body) {
     const form = element('div', 'dsp-form');
     const kind = element('select', 'text_pole');
 
-    for (const [key, era] of Object.entries(kindsFor(period()?.year))) {
+    for (const [key, era] of Object.entries(chatKinds())) {
         const option = element('option', null, era.label);
         option.value = key;
         kind.appendChild(option);
@@ -1303,6 +1483,7 @@ function addSettingsPanel() {
                 <label>Time passed means at least <input type="number" id="dsp-threshold" min="1" max="720" class="text_pole dsp-num"> hours</label>
                 <label>Documents per dispatch <input type="number" id="dsp-count" min="1" max="4" class="text_pole dsp-num"></label>
                 <label>Recent messages the writer sees <input type="number" id="dsp-recent" min="2" max="60" class="text_pole dsp-num"></label>
+                <label>Earlier documents the writer sees <input type="number" id="dsp-memory" min="0" max="40" class="text_pole dsp-num"> (0 for none)</label>
                 <label class="checkbox_label"><input type="checkbox" id="dsp-recall"><span>Send kept documents with the prompt when the conversation touches them (no lorebook)</span></label>
                 <label class="checkbox_label"><input type="checkbox" id="dsp-keep-brought"><span>Keep a document once it is brought into the scene</span></label>
                 <label>Kept documents: at most <input type="number" id="dsp-recall-budget" min="100" max="8000" class="text_pole dsp-num"> tokens a prompt</label>
@@ -1354,7 +1535,13 @@ function addSettingsPanel() {
     q('#dsp-recall-scan').value = s.recallScan;
     q('#dsp-recall-depth').value = s.recallDepth;
 
+    q('#dsp-memory').value = s.memoryCount;
+    q('#dsp-memory').addEventListener('change', () => { readRecall(); saveSettings(); });
+
     const readRecall = () => {
+        const memory = Number(q('#dsp-memory').value);
+        s.memoryCount = Number.isFinite(memory) ? Math.max(0, Math.min(40, Math.round(memory))) : 8;
+        q('#dsp-memory').value = s.memoryCount;
         s.recall = q('#dsp-recall').checked;
         s.keepBrought = q('#dsp-keep-brought').checked;
         s.recallBudget = Math.max(100, Math.min(8000, Number(q('#dsp-recall-budget').value) || 800));
@@ -1518,7 +1705,7 @@ function registerSlashCommands() {
         name: 'artefact',
         helpString: 'Write a document: <code>/artefact kind=article author="The Planet" subject="last night"</code>',
         namedArgumentList: [
-            SlashCommandNamedArgument.fromProps({ name: 'kind', description: KIND_KEYS.join(', '), typeList: [ARGUMENT_TYPE.STRING], isRequired: true }),
+            SlashCommandNamedArgument.fromProps({ name: 'kind', description: `${KIND_KEYS.join(', ')}, or the key of one of your own kinds`, typeList: [ARGUMENT_TYPE.STRING], isRequired: true }),
             SlashCommandNamedArgument.fromProps({ name: 'author', typeList: [ARGUMENT_TYPE.STRING], isRequired: false }),
             SlashCommandNamedArgument.fromProps({ name: 'subject', typeList: [ARGUMENT_TYPE.STRING], isRequired: false }),
         ],

@@ -138,4 +138,18 @@
 .dsp-poster-p { font-family: Arial, Helvetica, sans-serif; font-size: 15px; }
 .dsp-poster-from { font-family: Arial, Helvetica, sans-serif; font-size: 11px; margin-top: 14px; opacity: 0.7; }
 
+/* plain: a custom kind with no borrowed look */
+.dsp-plain-head { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgba(0, 0, 0, 0.3); padding-bottom: 6px; margin-bottom: 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+.dsp-plain-date { opacity: 0.75; }
+.dsp-plain-title { font-size: 20px; font-weight: 700; line-height: 1.2; margin-bottom: 10px; }
+.dsp-plain-to { font-style: italic; margin-bottom: 10px; }
+.dsp-plain-sign { margin-top: 16px; font-style: italic; text-align: right; }
+
 .dsp-select { display: inline-block; width: auto; margin-left: 4px; }
+
+/* ---- kinds tab ---- */
+.dsp-kinds { display: flex; flex-direction: column; gap: 2px; margin-bottom: 14px; }
+.dsp-kind-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.dsp-kind-row label { display: flex; align-items: center; gap: 6px; flex: 1; margin: 0; }
+.dsp-kind-gone { opacity: 0.5; }
+.dsp-kind-note { font-size: 0.85em; opacity: 0.65; }

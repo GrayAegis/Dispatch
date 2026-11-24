@@ -7,7 +7,7 @@
     "css": "style.css",
     "author": "GrayAegis",
     "generate_interceptor": "dispatchRecallInterceptor",
-    "version": "0.3.12",
+    "version": "0.3.13",
     "homePage": "https://github.com/GrayAegis/Dispatch",
     "auto_update": true
 }
