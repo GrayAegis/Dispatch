@@ -10,24 +10,37 @@ export const KINDS = {
         icon: 'fa-newspaper',
         guide: 'A newspaper or news-site piece: outlet, headline, dateline, byline, two to five short paragraphs in that outlet\'s house style. Reported facts are what a journalist could have learned, slightly wrong where the world would get them wrong.',
         found: 'a stall, a rack by the till, a screen in a window, a paper left on a seat, someone reading it aloud',
+        eras: [
+            { until: 1996, guide: 'A newspaper piece: paper, headline, dateline, byline, two to five short paragraphs in that paper\'s house style. Reported facts are what a journalist could have learned, slightly wrong where the world would get them wrong.', found: 'a stall, a rack by the till, a paper left on a seat, someone reading it aloud' },
+        ],
     },
     broadcast: {
         label: 'TV / radio',
         icon: 'fa-tv',
         guide: 'A transcript of a short television or radio segment: station, programme, presenter lines and any interview, with the stage directions a transcript would carry in brackets. Ninety seconds of air time at most.',
         found: 'a TV over a bar or counter, a car radio, a phone playing it, a shop window',
+        eras: [
+            { until: 1925, unavailable: true },
+            { until: 1950, label: 'Radio', guide: 'A transcript of a short radio segment: station, programme, announcer lines and any interview, with the directions a transcript would carry in brackets. Ninety seconds of air time at most.', found: 'a wireless set in a parlour or shop, a radio behind a counter, a set heard through an open window' },
+            { until: 2007, found: 'a TV over a bar or counter, a car radio, a set in a shop window' },
+        ],
     },
     text: {
         label: 'Text thread',
         icon: 'fa-comment-sms',
         guide: 'A phone message thread: sender, their relationship to the recipient, and three to eight messages with timestamps, in the sender\'s own voice and spelling. The recipient\'s replies, if any, are only ones they have already sent in the story; never write new ones.',
         found: 'the phone buzzing, a notification seen later, a message left unread',
+        eras: [{ until: 2000, unavailable: true }],
     },
     voicemail: {
         label: 'Voicemail',
         icon: 'fa-voicemail',
         guide: 'A transcript of one voicemail: caller, time, duration, and what they said, with the hesitations and background noise a real message has. Under 120 words.',
         found: 'a missed-call notification, a phone picked up later',
+        eras: [
+            { until: 1975, unavailable: true },
+            { until: 2000, label: 'Answering machine', guide: 'A transcript of one message left on a home or office answering machine: caller, when it was left, and what they said after the beep, with the hesitations and background noise a real message has. Under 120 words.', found: 'a blinking light on the answering machine, the tape played back on getting in' },
+        ],
     },
     note: {
         label: 'Note',
@@ -46,6 +59,7 @@ export const KINDS = {
         icon: 'fa-folder-open',
         guide: 'An official record: the agency or institution, case or reference number, subject, date, and the fields such a document would have (status, summary, observations, actions, officer or author). Dry, procedural, with the gaps and errors an institution would actually have.',
         found: 'a desk, a folder left open, a screen, a leak, a copy handed over',
+        eras: [{ until: 1980, found: 'a desk, a folder left open, a carbon copy, a leak, a copy handed over' }],
     },
     diary: {
         label: 'Diary page',
@@ -63,10 +77,79 @@ export const KINDS = {
 
 export const KIND_KEYS = Object.keys(KINDS);
 
-/** The system instruction for making documents. `n` documents; `mode` is 'dispatch' or 'artefact'. */
-export function systemPrompt({ mode, n, userName }) {
-    const kinds = KIND_KEYS.map(k => `- ${k}: ${KINDS[k].guide} Where found: ${KINDS[k].found}.`).join('\n');
-    const base = `You produce documents that exist inside a story's world. You are not the narrator and you do not continue the story; you write the things that would exist in the world at this point in it: what a newspaper printed, what a phone received, what a file says.
+/**
+ * The kinds as they exist in a given year: ones not yet invented are left out, and the rest carry
+ * that era's label, guide and places to be found. With no year, every kind as written above.
+ */
+export function kindsFor(year) {
+    const out = {};
+
+    for (const [key, kind] of Object.entries(KINDS)) {
+        const { eras = [], ...base } = kind;
+        const era = Number.isFinite(year) ? eras.find(e => year < e.until) : null;
+
+        if (era?.unavailable) {
+            continue;
+        }
+
+        const { until, ...changes } = era ?? {};
+        out[key] = { ...base, ...changes };
+    }
+
+    return out;
+}
+
+/** What a document's kind is called, allowing for the era it was written in. */
+export function kindLabel(doc) {
+    return doc?.label || KINDS[doc?.kind]?.label || doc?.kind;
+}
+
+/**
+ * Hold documents to a period: drop kinds that did not exist yet, and name the rest as the era would.
+ * Returns { kept, dropped }.
+ */
+export function holdToPeriod(docs, period) {
+    const available = kindsFor(period?.year);
+    const kept = [];
+    const dropped = [];
+
+    for (const doc of docs) {
+        const kind = available[doc.kind];
+
+        if (!kind) {
+            dropped.push(doc);
+            continue;
+        }
+
+        if (kind.label !== KINDS[doc.kind].label) {
+            doc.label = kind.label;
+
+            if (doc.source === KINDS[doc.kind].label) {
+                doc.source = kind.label;
+            }
+        }
+
+        kept.push(doc);
+    }
+
+    return { kept, dropped };
+}
+
+/** The rule that holds the writer to the story's period. */
+function periodRule(period) {
+    if (!period?.text) {
+        return '';
+    }
+
+    const unknownYear = Number.isFinite(period.year) ? '' : ' If the telephone, broadcasting, or print does not exist in this period, do not use the kinds that depend on it.';
+    return `\n- Period lock: the story is set in ${period.text}. Every document must be one that could exist then: its medium, how it is delivered and found, its layout, wording, slang, brands, prices, and every reference in it. Nothing invented or popularised later appears, even in passing. Only the kinds listed below exist; never produce any other.${unknownYear} The one exception is technology the reference material or the story itself establishes for this world.`;
+}
+
+/** The system instruction for making documents. `n` documents; `mode` is 'dispatch' or 'artefact'. `period` is { text, year } or null. */
+export function systemPrompt({ mode, n, userName, period = null }) {
+    const available = kindsFor(period?.year);
+    const kinds = Object.keys(available).map(k => `- ${k}: ${available[k].guide} Where found: ${available[k].found}.`).join('\n');
+    const base = `You produce documents that exist inside a story's world. You are not the narrator and you do not continue the story; you write the things that would exist in the world at this point in it: what a newspaper printed, what someone sent, what a file says.
 
 Rules:
 - Everything is in-world. No narrator, no commentary, no address to the reader, nothing about the story being a story.
@@ -74,7 +157,7 @@ Rules:
 - Information travels the way it would: a paper knows what a reporter could learn; a text knows what the sender knows; a file knows what the institution recorded. Get things slightly wrong the way the world would, and never reveal what nobody could know.
 - Never write ${userName}'s dialogue, thoughts, decisions, or replies. ${userName} may be the subject of a document, never its author, unless explicitly asked for a document ${userName} already wrote in the story.
 - Match register to source: a tabloid is not a broadsheet, a cop's file is not a doctor's, a teenager's text is not a lawyer's letter.
-- Keep each document the length its kind allows.
+- Keep each document the length its kind allows.${periodRule(period)}
 
 Kinds:
 ${kinds}
@@ -315,13 +398,13 @@ export function lorebookKeys(doc, exclude = []) {
 /** A one-line description for the in-tray and for telling the narrator what's around. */
 export function summary(doc) {
     const head = doc.title || doc.source;
-    return `${KINDS[doc.kind]?.label ?? doc.kind}: ${head}`;
+    return `${kindLabel(doc)}: ${head}`;
 }
 
 /** Plain text of a document, for injection and for filing. */
 export function plainText(doc) {
     const lines = [];
-    lines.push(`[${KINDS[doc.kind]?.label ?? doc.kind}] ${doc.source}${doc.date ? ` — ${doc.date}` : ''}`);
+    lines.push(`[${kindLabel(doc)}] ${doc.source}${doc.date ? ` — ${doc.date}` : ''}`);
 
     if (doc.title) {
         lines.push(doc.title);
@@ -444,7 +527,7 @@ export function render(doc, userName) {
         }
 
         case 'voicemail': {
-            page.appendChild(el('div', 'dsp-vm-head', `Voicemail · ${doc.from || doc.source}`));
+            page.appendChild(el('div', 'dsp-vm-head', `${kindLabel(doc)} · ${doc.from || doc.source}`));
             page.appendChild(el('div', 'dsp-vm-meta', doc.date));
             const wave = el('div', 'dsp-wave');
 

@@ -12,7 +12,8 @@ import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.j
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { elapsed, timeLine } from './time.js';
-import { KINDS, KIND_KEYS, lorebookKeys, parseDocuments, plainText, render, summary, systemPrompt, userPrompt } from './documents.js';
+import { KINDS, KIND_KEYS, holdToPeriod, kindLabel, kindsFor, lorebookKeys, parseDocuments, plainText, render, summary, systemPrompt, userPrompt } from './documents.js';
+import { resolvePeriod } from './period.js';
 
 const MODULE_NAME = 'dispatch';
 const LOG = '[Dispatch]';
@@ -101,6 +102,38 @@ function store() {
 
 function saveStore() {
     getContext().saveMetadataDebounced();
+}
+
+/**
+ * The period this chat is held to: what was typed for it in the tray, else the year on the story's
+ * own clock, else none. { text, year, source } or null.
+ */
+function period() {
+    const data = store();
+    return resolvePeriod({ setting: data?.period, clock: data?.lastTime });
+}
+
+/** One line on what the period lock is doing, for the tray. */
+function periodStatus() {
+    const p = period();
+
+    if (!p) {
+        return /^(off|none|no)$/i.test(String(store()?.period ?? '').trim())
+            ? 'Off for this chat.'
+            : 'No lock: nothing typed here, and no year on the story\'s clock.';
+    }
+
+    const from = p.source === 'clock' ? `Read from the story's clock: ${p.text}.` : `Locked to ${p.text}.`;
+
+    if (!Number.isFinite(p.year)) {
+        return `${from} No year in that, so the writer is told the period but no kinds are removed.`;
+    }
+
+    const available = kindsFor(p.year);
+    const gone = KIND_KEYS.filter(k => !available[k]).map(k => KINDS[k].label.toLowerCase());
+    const renamed = KIND_KEYS.filter(k => available[k] && available[k].label !== KINDS[k].label).map(k => `${KINDS[k].label.toLowerCase()} becomes ${available[k].label.toLowerCase()}`);
+    const effects = [gone.length ? `no ${gone.join(', no ')}` : null, ...renamed].filter(Boolean);
+    return `${from} ${effects.length ? effects.join('; ') + '.' : 'Every kind exists then.'}`;
 }
 
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -295,13 +328,36 @@ function currentPlace() {
 async function produce({ mode, request, n }) {
     const context = getContext();
     const s = settings();
+    const lock = period();
     const messages = [
-        { role: 'system', content: systemPrompt({ mode, n, userName: context.name1 }) },
+        { role: 'system', content: systemPrompt({ mode, n, userName: context.name1, period: lock }) },
         { role: 'user', content: userPrompt({ reference: await referenceText(), story: storyText(s.recent), request }) },
     ];
     let answer = await writer.call(messages, s.maxTokens);
     let docs = parseDocuments(answer);
     verbose('parsed documents', docs);
+
+    if (lock && docs.length) {
+        // The writer was not offered these kinds; if it produced one anyway, ask once more, then go without.
+        let held = holdToPeriod(docs, lock);
+
+        if (held.dropped.length) {
+            const wrong = [...new Set(held.dropped.map(d => d.kind))].join(', ');
+            console.warn(LOG, `period lock (${lock.text}): the writer produced ${wrong}; asking again`);
+            const again = [...messages, { role: 'assistant', content: String(answer ?? '') }, { role: 'user', content: `The story is set in ${lock.text}. These kinds do not exist then: ${wrong}. Answer again with the same number of documents, using only: ${Object.keys(kindsFor(lock.year)).join(', ')}.` }];
+            const retry = parseDocuments(await writer.call(again, s.maxTokens));
+
+            if (retry.length) {
+                held = holdToPeriod(retry, lock);
+            }
+
+            if (held.dropped.length) {
+                console.warn(LOG, `period lock (${lock.text}): discarded ${held.dropped.length} document(s) of a kind that does not exist then`);
+            }
+        }
+
+        return held.kept;
+    }
 
     if (!docs.length && !String(answer ?? '').trim()) {
         // No content: most often a thinking model that spent the whole budget reasoning. Once more, with room.
@@ -415,8 +471,13 @@ function applyWorldNote() {
         return;
     }
 
-    const lines = pending.map(item => `- ${item.found || KINDS[item.kind]?.found}: ${summary(item)}.`);
-    const note = `[World: since time passed, the following now exist and are within ${context.name1}'s reach in this scene. Let each be present and noticeable in a sentence of ordinary detail (a stall, a screen, a phone lighting up, an envelope), in the scene's own texture. Do not read it out, summarise it, or have anyone recite it; ${context.name1} decides whether to look, and only ${context.name1} does.\n${lines.join('\n')}]`;
+    const lock = period();
+    const kinds = kindsFor(lock?.year);
+    const lines = pending.map(item => `- ${item.found || (kinds[item.kind] ?? KINDS[item.kind])?.found}: ${summary(item)}.`);
+    const detail = lock
+        ? `in the scene's own texture. The story is set in ${lock.text}: each is come across only by means that exist then, and nothing later appears`
+        : '(a stall, a screen, a phone lighting up, an envelope), in the scene\'s own texture';
+    const note = `[World: since time passed, the following now exist and are within ${context.name1}'s reach in this scene. Let each be present and noticeable in a sentence of ordinary detail ${detail}. Do not read it out, summarise it, or have anyone recite it; ${context.name1} decides whether to look, and only ${context.name1} does.\n${lines.join('\n')}]`;
     context.setExtensionPrompt(NOTE_KEY, note, extension_prompt_types.IN_CHAT, Number(s.depth) || 0, false, extension_prompt_roles.SYSTEM);
 }
 
@@ -526,13 +587,22 @@ async function artefact({ kind, author, subject, notes }) {
         return null;
     }
 
+    const lock = period();
+    const era = kindsFor(lock?.year)[kind];
+
+    if (KINDS[kind] && !era) {
+        notify.warning(`A ${KINDS[kind].label.toLowerCase()} does not exist in ${lock.text}. Change the period in the tray, or set it to "off", to write one anyway.`, { timeOut: 8000 });
+        return null;
+    }
+
+    const label = (era ?? KINDS[kind])?.label.toLowerCase() ?? kind;
     busy = true;
     setStatus('writing…');
-    working(`Writing: ${KINDS[kind]?.label.toLowerCase() ?? kind}…`);
+    working(`Writing: ${label}…`);
 
     try {
         const request = [
-            `Request: one ${KINDS[kind]?.label.toLowerCase() ?? kind} (kind: ${kind}).`,
+            `Request: one ${label} (kind: ${kind}).`,
             author ? `Author or source: ${author}.` : null,
             subject ? `Subject: ${subject}.` : null,
             notes ? `Notes: ${notes}` : null,
@@ -546,6 +616,7 @@ async function artefact({ kind, author, subject, notes }) {
         }
 
         doc.kind = KIND_KEYS.includes(kind) ? kind : doc.kind;
+        holdToPeriod([doc], lock);
         const item = { id: uid(), origin: 'artefact', status: 'read', mentioned: true, at: (getContext().chat?.length ?? 1) - 1, ...doc };
         data.items.unshift(item);
         saveStore();
@@ -645,7 +716,7 @@ async function documentCss() {
 }
 
 function safeName(item) {
-    const base = `${KINDS[item.kind]?.label ?? item.kind} - ${item.title || item.source}`;
+    const base = `${kindLabel(item)} - ${item.title || item.source}`;
     return base.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'document';
 }
 
@@ -867,6 +938,10 @@ function draw(root) {
         return;
     }
 
+    if (!view.open) {
+        drawPeriod(body);
+    }
+
     if (view.open) {
         const item = data.items.find(i => i.id === view.open);
 
@@ -894,6 +969,27 @@ function draw(root) {
     }
 }
 
+/** The period this chat is held to: a field for it and a line on what it is doing. Kept per chat. */
+function drawPeriod(body) {
+    const data = store();
+    const row = element('label', 'dsp-field dsp-period');
+    row.appendChild(element('span', 'dsp-field-label', 'Period'));
+    const input = element('input', 'text_pole');
+    input.type = 'text';
+    input.value = data.period ?? '';
+    input.placeholder = '1994, Tokyo · the 90s · Victorian London · blank reads the year from the story\'s clock · off';
+    input.title = 'Holds everything Dispatch writes for this chat to a period. With a year in it, kinds of document that did not exist yet are removed.';
+    row.appendChild(input);
+    body.appendChild(row);
+    body.appendChild(element('div', 'dsp-muted dsp-period-status', periodStatus()));
+    input.addEventListener('change', () => {
+        data.period = input.value.trim();
+        saveStore();
+        applyWorldNote();
+        redraw();
+    });
+}
+
 function drawList(body, items, emptyText) {
     if (!items.length) {
         body.appendChild(element('p', 'dsp-muted', emptyText));
@@ -908,7 +1004,7 @@ function drawList(body, items, emptyText) {
         row.appendChild(icon);
         const text = element('div', 'dsp-row-text');
         text.appendChild(element('div', 'dsp-row-title', item.title || item.source));
-        text.appendChild(element('div', 'dsp-row-sub', [KINDS[item.kind]?.label, item.source, item.date].filter(Boolean).join(' · ')));
+        text.appendChild(element('div', 'dsp-row-sub', [kindLabel(item), item.source, item.date].filter(Boolean).join(' · ')));
 
         if (item.found && item.origin !== 'artefact') {
             text.appendChild(element('div', 'dsp-row-found', item.found));
@@ -1032,8 +1128,8 @@ function drawNewForm(body) {
     const form = element('div', 'dsp-form');
     const kind = element('select', 'text_pole');
 
-    for (const key of KIND_KEYS) {
-        const option = element('option', null, KINDS[key].label);
+    for (const [key, era] of Object.entries(kindsFor(period()?.year))) {
+        const option = element('option', null, era.label);
         option.value = key;
         kind.appendChild(option);
     }
@@ -1285,6 +1381,30 @@ function registerSlashCommands() {
     }));
 
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'dispatch-period',
+        helpString: 'Hold this chat\'s documents to a period: <code>/dispatch-period 1994, Tokyo</code>. <code>off</code> turns the lock off; <code>auto</code> reads the year from the story\'s clock. With nothing, says what is in force.',
+        unnamedArgumentList: [new SlashCommandArgument('period', [ARGUMENT_TYPE.STRING], false)],
+        callback: async (_args, value) => {
+            const data = store();
+            const text = String(value ?? '').trim();
+
+            if (!data) {
+                return '';
+            }
+
+            if (text) {
+                data.period = /^auto$/i.test(text) ? '' : text;
+                saveStore();
+                applyWorldNote();
+                redraw();
+            }
+
+            notify.info(`Period: ${periodStatus()}`);
+            return period()?.text ?? '';
+        },
+    }));
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'artefact',
         helpString: 'Write a document: <code>/artefact kind=article author="The Planet" subject="last night"</code>',
         namedArgumentList: [
@@ -1319,10 +1439,10 @@ function init() {
     eventSource.on(event_types.MESSAGE_RECEIVED, (id) => onReply(Number(id)));
     eventSource.on(event_types.MESSAGE_DELETED, () => refreshBadge());
     setTimeout(addButtons, 0);
-    console.log(LOG, 'ready');
+    fetch(new URL('./manifest.json', import.meta.url)).then(r => r.json()).then(m => console.log(LOG, `ready, version ${m.version}`)).catch(() => console.log(LOG, 'ready'));
 }
 
 /** For tests and other extensions. */
-globalThis.Dispatch = { dispatch, artefact, writer, store, settings, openTray, KINDS };
+globalThis.Dispatch = { dispatch, artefact, writer, store, settings, openTray, period, KINDS };
 
 init();

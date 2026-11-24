@@ -52,6 +52,8 @@
 .dsp-form { display: flex; flex-direction: column; gap: 8px; max-width: 640px; }
 .dsp-field { display: flex; flex-direction: column; gap: 2px; }
 .dsp-field-label { font-size: 0.85em; opacity: 0.7; }
+.dsp-period { margin-bottom: 2px; }
+.dsp-period-status { font-size: 0.85em; margin-bottom: 10px; }
 .dsp-settings label { display: block; margin: 4px 0; }
 .dsp-settings small { display: block; opacity: 0.75; margin-top: 6px; }
 .dsp-num { width: 5em; display: inline-block; margin: 0 4px; }
