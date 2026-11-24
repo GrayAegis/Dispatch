@@ -395,6 +395,47 @@ export function lorebookKeys(doc, exclude = []) {
     return merged.slice(0, 6);
 }
 
+/**
+ * Which kept documents belong in the next prompt: those with a key (a name, place, or thing from the
+ * document) appearing in `text`, the recent conversation. Most keys matched first, then newest, and
+ * only as many as fit in `budgetChars`. `items` is newest first. `exclude` holds names that are never keys.
+ */
+export function recall({ items, text, budgetChars, exclude = [] }) {
+    const hay = String(text ?? '');
+    const scored = [];
+
+    for (const [order, item] of items.entries()) {
+        let hits = 0;
+
+        for (const key of lorebookKeys(item, exclude)) {
+            const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+            if (new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(hay)) {
+                hits++;
+            }
+        }
+
+        if (hits) {
+            scored.push({ item, hits, order });
+        }
+    }
+
+    scored.sort((a, b) => b.hits - a.hits || a.order - b.order);
+    const chosen = [];
+    let used = 0;
+
+    for (const { item } of scored) {
+        const length = plainText(item).length;
+
+        if (used + length <= budgetChars) {
+            used += length;
+            chosen.push(item);
+        }
+    }
+
+    return chosen;
+}
+
 /** A one-line description for the in-tray and for telling the narrator what's around. */
 export function summary(doc) {
     const head = doc.title || doc.source;

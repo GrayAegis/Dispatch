@@ -12,13 +12,14 @@ import { SlashCommandParser } from '../../../slash-commands/SlashCommandParser.j
 import { SlashCommand } from '../../../slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '../../../slash-commands/SlashCommandArgument.js';
 import { elapsed, timeLine } from './time.js';
-import { KINDS, KIND_KEYS, holdToPeriod, kindLabel, kindsFor, lorebookKeys, parseDocuments, plainText, render, summary, systemPrompt, userPrompt } from './documents.js';
+import { KINDS, KIND_KEYS, holdToPeriod, kindLabel, kindsFor, lorebookKeys, parseDocuments, plainText, recall, render, summary, systemPrompt, userPrompt } from './documents.js';
 import { resolvePeriod } from './period.js';
 
 const MODULE_NAME = 'dispatch';
 const LOG = '[Dispatch]';
 const NOTE_KEY = 'DISPATCH_WORLD_NOTE';
 const READ_KEY = 'DISPATCH_READ_NOTE';
+const RECALL_KEY = 'DISPATCH_RECALL';
 const STATE_BLOCKS = /<!--[\s\S]*?-->/g;
 
 const defaultSettings = {
@@ -49,6 +50,16 @@ const defaultSettings = {
     maxTokens: 4000,
     /** Depth of the one-turn world note. */
     depth: 0,
+    /** Send kept documents with the prompt when the conversation touches them, without a lorebook. */
+    recall: true,
+    /** A document brought into the scene is kept from then on. */
+    keepBrought: true,
+    /** Most tokens of kept documents sent with one prompt (estimated at four characters a token). */
+    recallBudget: 800,
+    /** Recent messages searched for a kept document's names. */
+    recallScan: 4,
+    /** Depth the kept documents are inserted at. */
+    recallDepth: 4,
 };
 
 /** The one settings object, kept in place so every reference to it stays live. Missing keys get defaults. */
@@ -497,6 +508,51 @@ function applyReadNote() {
     context.setExtensionPrompt(READ_KEY, note, extension_prompt_types.IN_CHAT, 0, false, extension_prompt_roles.SYSTEM);
 }
 
+/** What the last prompt carried, for the tray: { titles, tokens } or null. */
+let lastRecall = null;
+
+/**
+ * Before each generation: send the kept documents the recent conversation touches, chosen by their
+ * keys and held to a budget. This is what a lorebook entry would do, without a lorebook.
+ */
+function applyRecall(chat) {
+    const context = getContext();
+    const s = settings();
+    const data = store();
+    const depth = Math.max(0, Number(s.recallDepth) || 0);
+    const kept = (data?.items ?? []).filter(item => item.kept && item.id !== data.readFor);
+    lastRecall = null;
+
+    if (!s.enabled || !s.recall || !kept.length) {
+        context.setExtensionPrompt(RECALL_KEY, '', extension_prompt_types.IN_CHAT, depth);
+        return;
+    }
+
+    const scan = Math.max(1, Number(s.recallScan) || 4);
+    const text = (chat ?? context.chat ?? []).filter(m => m && !m.is_system).slice(-scan).map(m => String(m.mes ?? '').replace(STATE_BLOCKS, '')).join('\n');
+    const chosen = recall({ items: kept, text, budgetChars: Math.max(100, Number(s.recallBudget) || 800) * 4, exclude: [context.name1] });
+
+    if (!chosen.length) {
+        context.setExtensionPrompt(RECALL_KEY, '', extension_prompt_types.IN_CHAT, depth);
+        return;
+    }
+
+    const body = chosen.map(plainText).join('\n\n---\n\n');
+    const note = `[Documents that exist in this story's world and bear on the present scene. Each says what its source recorded, which may be wrong. A character knows a document's contents only if they wrote it, received it, or have read it in the story; ${context.name1} has read the ones marked as read. Do not quote or recite them.\n\n${chosen.map(item => `${item.brought ? `(read by ${context.name1}) ` : ''}${plainText(item)}`).join('\n\n---\n\n')}]`;
+    context.setExtensionPrompt(RECALL_KEY, note, extension_prompt_types.IN_CHAT, depth, false, extension_prompt_roles.SYSTEM);
+    lastRecall = { titles: chosen.map(summary), tokens: Math.round(body.length / 4) };
+    verbose('kept documents sent with this prompt', lastRecall);
+}
+
+/** Called by SillyTavern before every generation (see manifest.json). */
+globalThis.dispatchRecallInterceptor = async function (chat) {
+    try {
+        applyRecall(chat);
+    } catch (error) {
+        console.error(LOG, 'could not choose kept documents for this prompt:', error);
+    }
+};
+
 function bringIn(item) {
     const data = store();
 
@@ -507,6 +563,11 @@ function bringIn(item) {
     data.readFor = item.id;
     item.status = 'read';
     item.brought = true;
+
+    if (settings().keepBrought) {
+        item.kept = true;
+    }
+
     applyReadNote();
     saveStore();
     refreshBadge();
@@ -957,9 +1018,17 @@ function draw(root) {
         case 'tray':
             drawList(body, data.items.filter(i => i.origin !== 'artefact'), 'Nothing has arrived yet. Things appear here when in-fiction time passes.');
             break;
-        case 'library':
-            drawList(body, data.items.filter(i => i.origin === 'artefact' || i.brought || i.filed || i.banked), 'Nothing here yet. Documents you make, bring in, or file collect here.');
+        case 'library': {
+            const kept = data.items.filter(i => i.kept).length;
+
+            if (kept) {
+                const sent = lastRecall ? `The last prompt carried ${lastRecall.titles.length} (about ${lastRecall.tokens} tokens): ${lastRecall.titles.join('; ')}.` : 'The last prompt carried none.';
+                body.appendChild(element('div', 'dsp-muted dsp-period-status', `${kept} kept. ${settings().recall ? sent : 'Sending kept documents is switched off in settings.'}`));
+            }
+
+            drawList(body, data.items.filter(i => i.origin === 'artefact' || i.brought || i.kept || i.filed || i.banked), 'Nothing here yet. Documents you make, bring in, keep, or file collect here.');
             break;
+        }
         case 'new':
             drawNewForm(body);
             break;
@@ -1017,6 +1086,10 @@ function drawList(body, items, emptyText) {
             flags.appendChild(element('span', 'dsp-flag', 'in scene'));
         }
 
+        if (item.kept) {
+            flags.appendChild(element('span', 'dsp-flag', 'kept'));
+        }
+
         if (item.filed) {
             flags.appendChild(element('span', 'dsp-flag', 'filed'));
         }
@@ -1058,6 +1131,17 @@ function drawDocument(body, item) {
         actions.appendChild(bring);
     } else {
         actions.appendChild(element('span', 'dsp-flag', 'in scene'));
+    }
+
+    const keep = element('button', 'menu_button', item.kept ? 'Stop keeping' : 'Keep in the story');
+    keep.title = item.kept
+        ? 'Stop sending this with the prompt. It stays in the library.'
+        : 'Dispatch sends this with the prompt whenever the conversation mentions its names, places, or things. No lorebook entry is made.';
+    keep.addEventListener('click', () => { item.kept = !item.kept; saveStore(); redraw(); });
+    actions.appendChild(keep);
+
+    if (item.kept) {
+        actions.appendChild(element('span', 'dsp-flag', `kept · ${lorebookKeys(item, [getContext().name1]).join(', ') || 'no keys'}`));
     }
 
     if (!item.filed) {
@@ -1219,6 +1303,11 @@ function addSettingsPanel() {
                 <label>Time passed means at least <input type="number" id="dsp-threshold" min="1" max="720" class="text_pole dsp-num"> hours</label>
                 <label>Documents per dispatch <input type="number" id="dsp-count" min="1" max="4" class="text_pole dsp-num"></label>
                 <label>Recent messages the writer sees <input type="number" id="dsp-recent" min="2" max="60" class="text_pole dsp-num"></label>
+                <label class="checkbox_label"><input type="checkbox" id="dsp-recall"><span>Send kept documents with the prompt when the conversation touches them (no lorebook)</span></label>
+                <label class="checkbox_label"><input type="checkbox" id="dsp-keep-brought"><span>Keep a document once it is brought into the scene</span></label>
+                <label>Kept documents: at most <input type="number" id="dsp-recall-budget" min="100" max="8000" class="text_pole dsp-num"> tokens a prompt</label>
+                <label>Kept documents: search the last <input type="number" id="dsp-recall-scan" min="1" max="40" class="text_pole dsp-num"> messages for their names</label>
+                <label>Kept documents: insert at depth <input type="number" id="dsp-recall-depth" min="0" max="100" class="text_pole dsp-num"></label>
                 <label>Writer runs on
                     <select id="dsp-source" class="text_pole">
                         <option value="main">the chat's connection, prompt sent straight (no preset)</option>
@@ -1259,6 +1348,26 @@ function addSettingsPanel() {
     q('#dsp-count').value = s.count;
     q('#dsp-recent').value = s.recent;
     q('#dsp-tokens').value = s.maxTokens;
+    q('#dsp-recall').checked = s.recall;
+    q('#dsp-keep-brought').checked = s.keepBrought;
+    q('#dsp-recall-budget').value = s.recallBudget;
+    q('#dsp-recall-scan').value = s.recallScan;
+    q('#dsp-recall-depth').value = s.recallDepth;
+
+    const readRecall = () => {
+        s.recall = q('#dsp-recall').checked;
+        s.keepBrought = q('#dsp-keep-brought').checked;
+        s.recallBudget = Math.max(100, Math.min(8000, Number(q('#dsp-recall-budget').value) || 800));
+        s.recallScan = Math.max(1, Math.min(40, Number(q('#dsp-recall-scan').value) || 4));
+        s.recallDepth = Math.max(0, Math.min(100, Number(q('#dsp-recall-depth').value) || 0));
+        q('#dsp-recall-budget').value = s.recallBudget;
+        q('#dsp-recall-scan').value = s.recallScan;
+        q('#dsp-recall-depth').value = s.recallDepth;
+    };
+
+    for (const id of ['#dsp-recall', '#dsp-keep-brought', '#dsp-recall-budget', '#dsp-recall-scan', '#dsp-recall-depth']) {
+        q(id).addEventListener('change', () => { readRecall(); saveSettings(); });
+    }
 
     const profile = q('#dsp-profile');
     const source = q('#dsp-source');
@@ -1292,6 +1401,7 @@ function addSettingsPanel() {
     showSub();
 
     const readAll = () => {
+        readRecall();
         s.enabled = q('#dsp-enabled').checked;
         s.auto = q('#dsp-auto').checked;
         s.thresholdHours = Math.max(1, Number(q('#dsp-threshold').value) || 3);
@@ -1435,7 +1545,7 @@ function init() {
     registerSlashCommands();
 
     eventSource.on(event_types.APP_READY, () => { addButtons(); refreshBadge(); });
-    eventSource.on(event_types.CHAT_CHANGED, () => { store(); applyWorldNote(); applyReadNote(); refreshBadge(); });
+    eventSource.on(event_types.CHAT_CHANGED, () => { store(); lastRecall = null; getContext().setExtensionPrompt(RECALL_KEY, '', extension_prompt_types.IN_CHAT, 0); applyWorldNote(); applyReadNote(); refreshBadge(); });
     eventSource.on(event_types.MESSAGE_RECEIVED, (id) => onReply(Number(id)));
     eventSource.on(event_types.MESSAGE_DELETED, () => refreshBadge());
     setTimeout(addButtons, 0);

@@ -20,6 +20,8 @@ No extra calls during normal play. One call when time passes (if enabled), one p
 
 **Bringing one in.** On a document, *Bring into the scene* tells the narrator, for one turn, that your character has just read it, verbatim, and that the people around react only to what they can see — not to the contents unless they already know them. Your next message is still yours; nothing decides what your character makes of it.
 
+**Keeping.** *Keep in the story* marks a document as part of the story without touching any lorebook. Before each generation Dispatch looks through the last few messages for the document's keys (the names, places, and things in it) and sends the documents that match, most matches first, up to a token budget. A document brought into the scene is kept automatically. The Library says what the last prompt carried. The budget, how many messages are searched, the depth, and the automatic keeping are in settings; the documents live in the chat's own data, so they follow the chat and its branches.
+
 **Saving.** *Save as* HTML (a standalone styled page), PNG (the rendered page at 2×), or JSON (the document as the writer produced it). The file is named after the kind and title.
 
 **Filing.** *File to lorebook* writes the document into the chat-bound lorebook as a keyed entry (title, source, author as separate keys; comment prefixed `[Dispatch]`), so it enters the prompt only when it's relevant later. That book is shared with MemoryBooks if you use it; both leave each other's entries alone, and the book follows branches with the chat.
